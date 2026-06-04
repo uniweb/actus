@@ -1,0 +1,25 @@
+[package]
+name = "actus-advanced-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+actus = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+# Used by the integration tests' raw-HTTP helper for HeaderMap parsing.
+# `http` is already in the workspace deps (a transitive dep of `actus`),
+# so this just gives the test crate a direct line on the types.
+http = { workspace = true }
+
+[lints]
+workspace = true

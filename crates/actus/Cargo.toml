@@ -1,0 +1,52 @@
+[package]
+name = "actus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "The ergonomic web framework for Rust."
+documentation = "https://docs.rs/actus"
+readme = "../../README.md"
+
+[dependencies]
+actus-reply = { workspace = true }
+actus-controller = { workspace = true }
+actus-server = { workspace = true }
+# Re-exported as `actus::InitError` / `actus::InitResult` for the
+# `app_routes!` macro's generated `init()` return type. anyhow is the
+# de facto Rust app-level error type; using it directly removes the
+# `Box<dyn Error>` ↔ `anyhow::Error` `?`-conversion friction.
+anyhow = { workspace = true }
+# Re-exported in `prelude` so handlers can write `body: Bytes` in
+# `routes!` without an extra `use bytes::Bytes;` line.
+bytes = { workspace = true }
+
+# Used only by the crate-level doc quickstart (a `no_run` doctest) so the
+# example on https://docs.rs/actus is compile-checked, not illustrative.
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Response compression (gzip / brotli) — off by default. With it enabled,
+# `Server::with_compression` and `CompressionLayer` become available.
+compression = ["actus-server/compression"]
+# WebSocket support — off by default. With it enabled, `actus::ws` (and the
+# `Message` / `WebSocket` prelude items) become available.
+websocket = ["actus-server/websocket"]
+# OpenAPI doc generation — off by default. With it enabled, `actus::openapi`
+# becomes available.
+openapi = ["actus-server/openapi"]
+
+[lints]
+workspace = true
+
+# docs.rs builds the facade with every feature so the rendered API on
+# https://docs.rs/actus includes compression, websocket, and openapi.
+[package.metadata.docs.rs]
+all-features = true

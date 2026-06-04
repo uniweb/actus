@@ -1,0 +1,18 @@
+# Standalone crate — not part of the actus workspace.
+[workspace]
+
+[package]
+name = "actus-ws-fanout"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

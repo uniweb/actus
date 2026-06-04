@@ -1,0 +1,65 @@
+[workspace]
+members = [
+    "crates/actus",
+    "crates/actus-reply",
+    "crates/actus-controller",
+    "crates/actus-controller/macros",
+    "crates/actus-server",
+    "examples/basic",
+    "examples/advanced",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/uniweb/actus"
+homepage = "https://github.com/uniweb/actus"
+authors = ["Proximify Inc. <support@proximify.com>"]
+keywords = ["http", "web", "framework", "hyper", "router"]
+categories = ["web-programming::http-server", "web-programming"]
+
+[workspace.lints.clippy]
+# HTTP verb identifiers (`GET`, `POST`, etc.) are RFC 7231 spec names,
+# not stylistic acronyms; upper-case is correct.
+upper_case_acronyms = "allow"
+
+[workspace.dependencies]
+# Internal — `version` is required for crates.io publishing; locally the
+# `path` takes precedence so the workspace always builds against source.
+actus = { path = "crates/actus", version = "1.0.0" }
+actus-reply = { path = "crates/actus-reply", version = "1.0.0" }
+actus-controller = { path = "crates/actus-controller", version = "1.0.0" }
+actus-controller-macros = { path = "crates/actus-controller/macros", version = "1.0.0" }
+actus-server = { path = "crates/actus-server", version = "1.0.0" }
+
+# Web & HTTP
+hyper = { version = "1.3", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http = "1.1"
+http-body-util = "0.1"
+bytes = "1.6"
+
+# Async
+tokio = { version = "1.38", features = ["full"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Serde / errors
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+thiserror = "1"
+anyhow = "1"
+
+# Tracing
+tracing = "0.1"
+
+# Compression (optional — only pulled in by the `compression` feature)
+flate2 = "1"
+brotli = "7"
+
+# WebSocket (optional — only pulled in by the `websocket` feature)
+tokio-tungstenite = "0.24"

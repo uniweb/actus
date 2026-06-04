@@ -1,0 +1,38 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+# Validated in CI by the `deny` job in .github/workflows/ci.yml.
+# Run locally with: cargo install cargo-deny && cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# RustSec advisory database. Known vulnerabilities fail the check; yanked
+# crates warn. Add specific advisory IDs here (each with a comment explaining
+# why) only after a deliberate review decides to accept the risk.
+ignore = []
+
+[licenses]
+version = 2
+# Every dependency must be usable under one of these. The set is derived from
+# the current dependency tree (all features). Actus itself is MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Two copies of one crate is a warning, not an error — the hyper/tokio
+# ecosystem commonly carries transitional duplicate versions.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

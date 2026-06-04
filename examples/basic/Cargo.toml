@@ -1,0 +1,22 @@
+[package]
+name = "actus-basic-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# `compression`, `websocket`, and `openapi` are opt-in on `actus`; the
+# example turns them on to demo `Server::with_compression`, `ws::upgrade`,
+# and `openapi::generate`.
+actus = { workspace = true, features = ["compression", "websocket", "openapi"] }
+futures-util = { workspace = true }
+
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

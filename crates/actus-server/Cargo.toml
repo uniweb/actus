@@ -1,0 +1,73 @@
+[package]
+name = "actus-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "The hyper-based HTTP server and longest-prefix router for Actus."
+documentation = "https://docs.rs/actus-server"
+
+[dependencies]
+actus-controller = { workspace = true }
+actus-reply = { workspace = true }
+
+# HTTP
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+
+# Serde / errors
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Compression (only pulled in by the `compression` feature)
+flate2 = { workspace = true, optional = true }
+brotli = { workspace = true, optional = true }
+
+# WebSocket (only pulled in by the `websocket` feature)
+tokio-tungstenite = { workspace = true, optional = true }
+
+[features]
+# Response compression (gzip / brotli) via `Server::with_compression`.
+compression = ["dep:flate2", "dep:brotli"]
+# WebSocket support via `actus_server::websocket` (`ws::upgrade`).
+websocket = ["dep:tokio-tungstenite"]
+# OpenAPI 3.x doc generation via `actus_server::openapi::generate`.
+# (`serde_json` is already a non-optional dep, so the feature just enables
+# the module compilation — no extra crates are pulled in.)
+openapi = []
+
+[dev-dependencies]
+# The WebSocket integration test (`tests/websocket.rs`) drives a real server
+# with the `app_routes!`/`controller` macros and a `tokio-tungstenite` client.
+# Path-only (no `version`) on purpose: `actus` depends on `actus-server`, so a
+# versioned back-edge here would deadlock the leaf-first publish. Cargo drops a
+# path-only dev-dep from the published manifest; locally it still resolves via
+# the workspace path, so `tests/websocket.rs` is unaffected.
+actus = { path = "../actus", features = ["websocket"] }
+
+[lints]
+workspace = true
+
+# docs.rs builds actus-server with every feature so its rendered API page
+# includes the compression, websocket, and openapi modules.
+[package.metadata.docs.rs]
+all-features = true
