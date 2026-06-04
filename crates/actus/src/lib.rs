@@ -4,6 +4,45 @@
 //! services, real HTTP — out of the box. Built directly on [hyper] and
 //! [tokio]; there is no separate server to run it on.
 //!
+//! Actus gives you a clear two-tier structure — a top-level routing blueprint
+//! and self-contained controllers — while letting you mix REST, RPC-style
+//! actions, and legacy URL migrations in the same codebase. A reviewer can
+//! answer *what endpoints exist, what they require, and who can call them* by
+//! reading two macros, without grepping for attribute decorators across files.
+//!
+//! # Philosophy
+//!
+//! Most Rust web frameworks are either unopinionated (you invent the structure)
+//! or rigidly opinionated (you bend to their paradigm). Actus picks a middle:
+//!
+//! - **A clear hierarchy.** The whole URL layout is declared once, in
+//!   `app_routes! { ... }` — the entire backend is visible at a glance.
+//! - **A clear unit of code.** Each controller owns a URL prefix and declares
+//!   its routes, access points, and parameters in one `routes! { ... }` block.
+//! - **Pragmatism inside that structure.** REST verbs (`GET`/`POST`/`PUT`/
+//!   `DELETE`), RPC-style action names (`/charge`, `/refund`), path parameters
+//!   (`{id}`), and legacy URLs (`login.php`) all coexist in the same block.
+//!
+//! # Design principles
+//!
+//! - **Two kinds of cross-cutting concern get two shapes.** HTTP-protocol
+//!   concerns (CORS, body limits, compression) are named `Server::with_X(...)`
+//!   methods with their lifecycle position built in; application concerns
+//!   (logging, auth gates, request IDs, rate-limit policy) are `Middleware`.
+//!   You never have to position CORS in a stack.
+//! - **Auditability over uniformity.** "What does this server do?" and "what
+//!   endpoints exist?" are answerable from `Server::new(...)` and the two
+//!   macros — without walking a chain of layers.
+//! - **Explicit over magic.** No DI container, no extractors reaching into thin
+//!   air: the `app_routes!` `deps` block is constructor injection, and routes
+//!   are declared, not discovered.
+//! - **HTTP correctness out of the box.** You shouldn't need to know that
+//!   compression goes outermost, or that the body cap gates the body parse —
+//!   that is framework knowledge, not application knowledge.
+//! - **Policy-agnostic.** No roles, no `Access` enum, no built-in RBAC.
+//!   Authorization lives in your policy layer, called from a controller's
+//!   `prepare` hook or a handler.
+//!
 //! This crate is the façade you depend on. It re-exports the public API of the
 //! implementation crates ([`actus-server`], [`actus-controller`],
 //! [`actus-reply`]) and the two macros that declare your application's URL
@@ -65,15 +104,42 @@
 //! }
 //! ```
 //!
-//! See the [`prelude`] for the common imports, and the repository's
-//! `examples/` directory for auth, typed bodies, CORS, compression,
-//! WebSockets, SSE, and middleware in working code.
+//! # What's in the box
+//!
+//! - **Hyper-based HTTP server** — `Server::run(port)` binds `127.0.0.1`;
+//!   `Server::run_on(addr)` binds anywhere (e.g. `0.0.0.0:port`). Graceful
+//!   shutdown on SIGTERM / SIGINT with a configurable drain deadline.
+//! - **Two-macro routing** — `app_routes!` (the app's URL blueprint, with a
+//!   `deps` block for injected services) and `#[controller]` + `routes!`
+//!   (per-controller verbs, path patterns, typed query/body extraction, a
+//!   `prepare` hook, and per-controller `max_body_bytes` / `rate_limit`).
+//! - **Longest-prefix routing** at arbitrary depth, with a trailing
+//!   `{...rest}` catch-all and distinct `404` vs `405` (carrying `Allow`).
+//! - **Typed extraction & state** — query as a multimap, form-urlencoded
+//!   bodies, and typed path/query/body params; `prepare` hooks stash typed
+//!   values via `params.insert::<T>(...)` that handlers read back.
+//! - **Replies** — `reply!` for JSON, chunked streams, and Server-Sent
+//!   Events; `WebError` for structured RFC 7807 `application/problem+json`.
+//! - **HTTP-protocol features** — `Server::with_cors`, `with_compression`
+//!   (gzip/brotli, `compression` feature), a per-request timeout, and three
+//!   DoS guards (max connections, in-flight body budget, header-read timeout).
+//! - **WebSocket** (`websocket` feature) — `ws::upgrade(...)` from a handler.
+//! - **OpenAPI 3.x** (`openapi` feature) — `openapi::generate(...)` walks the
+//!   route tree and emits a spec.
+//! - **Middleware** — `before` / `after` hooks via `Server::with_middleware`;
+//!   ships a `RequestLogger`.
+//!
+//! See the [`prelude`] for the common imports, and the [repository] for the
+//! full guide — philosophy, framework comparisons, and the `examples/`
+//! directory with auth, typed bodies, CORS, compression, WebSockets, SSE, and
+//! middleware in working code.
 //!
 //! [hyper]: https://hyper.rs/
 //! [tokio]: https://tokio.rs/
 //! [`actus-server`]: https://docs.rs/actus-server
 //! [`actus-controller`]: https://docs.rs/actus-controller
 //! [`actus-reply`]: https://docs.rs/actus-reply
+//! [repository]: https://github.com/uniweb/actus
 
 pub use actus_reply::Finalizer;
 
