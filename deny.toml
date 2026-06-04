@@ -32,6 +32,12 @@ confidence-threshold = 0.8
 # ecosystem commonly carries transitional duplicate versions.
 multiple-versions = "warn"
 wildcards = "deny"
+# actus-server's dev-dependency on `actus` is intentionally a version-less path
+# dep: `actus` depends on `actus-server`, so the back-edge must be dropped from
+# the published manifest to avoid a leaf-first publish deadlock. A version-less
+# path dep reads as a wildcard; allow it. cargo-deny permits a wildcard path dep
+# on a *published* crate only when it is a dev-dependency — which this is.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
