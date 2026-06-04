@@ -3,7 +3,6 @@
 [![crates.io](https://img.shields.io/crates/v/actus.svg)](https://crates.io/crates/actus)
 [![docs.rs](https://img.shields.io/docsrs/actus)](https://docs.rs/actus)
 [![CI](https://github.com/uniweb/actus/actions/workflows/ci.yml/badge.svg)](https://github.com/uniweb/actus/actions/workflows/ci.yml)
-[![license](https://img.shields.io/crates/l/actus.svg)](#license)
 
 > The pragmatic web framework for Rust. Auditable controllers, persistent services, real HTTP — out of the box.
 
