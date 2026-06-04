@@ -10,6 +10,15 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+## [1.0.1]
+
+Documentation-only release; the public API is identical to 1.0.0.
+
+- Enriched the crate-level rustdoc landing page that docs.rs renders — added
+  Philosophy, Design principles, and a feature overview so it mirrors the
+  README, plus a repository link. The README's badge row also dropped the
+  flaky crates.io license badge.
+
 ## [1.0.0]
 
 First stable release. `1.0` is an API-stability commitment: from here, breaking
@@ -63,6 +72,7 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/uniweb/actus/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/uniweb/actus/releases/tag/v1.0.0
 [0.4.0]: https://github.com/uniweb/actus/releases/tag/v0.4.0
