@@ -10,6 +10,8 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+## [1.1.0]
+
 ### Added
 
 - `Server::run_listener` / `Server::run_with_shutdown_listener` — serve on a
@@ -84,7 +86,8 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/uniweb/actus/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/uniweb/actus/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/uniweb/actus/releases/tag/v1.0.0
 [0.4.0]: https://github.com/uniweb/actus/releases/tag/v0.4.0
