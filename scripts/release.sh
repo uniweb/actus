@@ -183,6 +183,19 @@ else
   _warn "MSRV toolchain $MSRV not installed — skipped locally (CI enforces it). Install: rustup toolchain install $MSRV"
 fi
 
+# ci.yml's fourth job, and the one this script originally missed. It is the only
+# gate leg that can go red with NO change to this repo — a new RUSTSEC advisory
+# filed against a dependency turns it red overnight. That is exactly what
+# happened on 2026-08-04 (anyhow 1.0.102), and because the local gate didn't run
+# it, a release went out against a red main without anyone noticing.
+if command -v cargo-deny >/dev/null 2>&1; then
+  _step "Gate: cargo-deny (advisories, licenses, bans, sources)"
+  cargo deny check
+  _ok "cargo-deny"
+else
+  _warn "cargo-deny not installed — skipped locally (CI enforces it). Install: cargo install cargo-deny"
+fi
+
 # The authoritative packaging check: builds each crate from its *packaged*
 # tarball against a temp registry, in dependency order. This is what catches a
 # missing `version` on an internal dep or a file the package excludes.
