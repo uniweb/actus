@@ -10,6 +10,18 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- `Server::run_listener` / `Server::run_with_shutdown_listener` — serve on a
+  listener the caller already bound or inherited. This is the **socket
+  activation** entry point (systemd `LISTEN_FDS`, launchd): the supervisor
+  owns the socket, so connections arriving during a process restart queue in
+  the kernel's accept backlog instead of being refused, and the next process
+  serves them. Also the race-free shape for tests and embedding (bind
+  `127.0.0.1:0`, keep the listener, pass it in). `run_with_shutdown_on` is
+  now a thin bind-then-delegate over the listener form; behavior of every
+  existing `run*` method is unchanged.
+
 ## [1.0.1]
 
 Documentation-only release; the public API is identical to 1.0.0.

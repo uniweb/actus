@@ -279,9 +279,11 @@ impl Server {
             .await
     }
 
-    /// The general form: bind `addr`, serve until `shutdown` resolves, then
-    /// drain. [`Server::run`], [`Server::run_on`], and
-    /// [`Server::run_with_shutdown`] are thin wrappers over this.
+    /// Bind `addr`, then serve exactly as
+    /// [`Server::run_with_shutdown_listener`] — the general form — does.
+    /// [`Server::run`], [`Server::run_on`], and [`Server::run_with_shutdown`]
+    /// are thin wrappers over this; this is a thin bind over the listener
+    /// form.
     ///
     /// **Drain bound.** Once `shutdown` resolves the server stops accepting
     /// and signals every in-flight connection to wind down. The drain
@@ -298,8 +300,66 @@ impl Server {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServerError> {
         let listener = TcpListener::bind(addr).await?;
-        let addr = listener.local_addr().unwrap_or(addr);
-        info!("Server listening on http://{}", addr);
+        self.run_with_shutdown_listener(listener, shutdown).await
+    }
+
+    /// Like [`Server::run_on`] but serves on a listener the caller already
+    /// bound (or inherited), with the default SIGTERM / SIGINT shutdown
+    /// trigger. See [`Server::run_with_shutdown_listener`] for what a
+    /// pre-bound listener buys and how to adopt an inherited one.
+    pub async fn run_listener(self, listener: TcpListener) -> Result<(), ServerError> {
+        self.run_with_shutdown_listener(listener, default_shutdown_signal())
+            .await
+    }
+
+    /// The most general form: serve on a listener the caller already bound
+    /// (or inherited) until `shutdown` resolves, then drain. Every other
+    /// `run*` method is a wrapper over this one.
+    ///
+    /// **Why hand the server a listener.** Two cases the bind-it-yourself
+    /// forms can't express:
+    ///
+    /// - **Socket activation** — a supervisor (systemd's `LISTEN_FDS`
+    ///   protocol, launchd, …) owns the listening socket and passes it to
+    ///   the process it spawns. Because the socket outlives the process,
+    ///   connections arriving during a restart queue in the kernel's accept
+    ///   backlog instead of being refused, and the next process serves them.
+    /// - **Race-free embedding and tests** — bind `127.0.0.1:0`, keep the
+    ///   listener, and pass it in; no bind-drop-rebind window in which the
+    ///   port can be lost, and requests may connect before the accept loop
+    ///   even starts (the kernel queues them).
+    ///
+    /// An inherited `std::net::TcpListener` must be set non-blocking before
+    /// conversion — tokio requires it, and a supervisor passes the fd
+    /// blocking:
+    ///
+    /// ```no_run
+    /// # async fn doc(server: actus_server::Server, inherited: std::net::TcpListener)
+    /// # -> Result<(), actus_server::ServerError> {
+    /// inherited.set_nonblocking(true)?;
+    /// let listener = tokio::net::TcpListener::from_std(inherited)?;
+    /// server.run_with_shutdown_listener(listener, std::future::pending()).await
+    /// # }
+    /// ```
+    ///
+    /// **Drain bound.** As [`Server::run_with_shutdown_on`]: once `shutdown`
+    /// resolves the server stops accepting (the listener is dropped — under
+    /// socket activation the *socket* stays open in the supervisor, which is
+    /// the point) and in-flight connections get [`Server::with_drain_deadline`]
+    /// (default [`DEFAULT_DRAIN_DEADLINE`] = 30 s) to finish before being
+    /// aborted. A streaming response that never completes (SSE) always rides
+    /// to the deadline.
+    pub async fn run_with_shutdown_listener(
+        self,
+        listener: TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ServerError> {
+        match listener.local_addr() {
+            Ok(addr) => info!("Server listening on http://{}", addr),
+            // An inherited fd can decline local_addr (exotic socket family);
+            // serving still works, so log what we know and carry on.
+            Err(_) => info!("Server listening on an inherited socket"),
+        }
 
         let app = Arc::new(self);
         // Per-connection cancellation: once `Notify::notify_waiters` fires,
