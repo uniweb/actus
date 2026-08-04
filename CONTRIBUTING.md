@@ -84,6 +84,48 @@ The `examples/basic` and `examples/advanced` crates must always compile and run.
   under `[Unreleased]`.
 - Split separately-reviewable pieces into separate commits.
 
+## Releasing
+
+One command, from a clean default branch — say the *kind* of bump and the
+version is computed from the manifest:
+
+```sh
+./scripts/release.sh minor     # 1.0.1 → 1.1.0
+./scripts/release.sh patch     # 1.0.1 → 1.0.2
+./scripts/release.sh major     # 1.0.1 → 2.0.0
+```
+
+Pick the kind from what the `[Unreleased]` entries say: new public API is a
+**minor** bump, fixes and docs are a **patch**. An explicit `X.Y.Z` is also
+accepted, for what arithmetic can't express (`2.0.0-rc.1`, or skipping a
+version deliberately). Write the CHANGELOG entry as part of the change itself —
+the release script refuses an empty `[Unreleased]`.
+
+It bumps the workspace version and the five internal dependency pins, cuts
+`[Unreleased]` in `CHANGELOG.md` to the new version, refreshes `Cargo.lock`,
+runs the full gate (fmt · clippy · tests, both feature configs · MSRV ·
+`cargo publish --workspace --dry-run`), then commits, tags, and — after one
+confirmation — pushes.
+
+**Pushing the tag is what publishes.** `.github/workflows/release.yml` fires on
+`v*`, uploads all five crates, and opens a GitHub Release from the CHANGELOG
+section. Nobody needs crates.io credentials on their machine: CI authenticates
+with [Trusted Publishing](https://crates.io/docs/trusted-publishing), which
+trades the workflow's GitHub OIDC identity for a 30-minute token. There is no
+long-lived registry token in the repo secrets.
+
+That workflow deliberately does **not** re-run the test matrix: the tagged
+commit is pushed to the default branch first, so `ci.yml` is already running on
+those exact bytes, and the release script ran the same checks locally before the
+tag existed. It checks the two things nothing else does — that the tag agrees
+with the manifest version, and that `cargo publish` can build every crate from
+its packaged tarball.
+
+`--no-push` does everything locally and stops, so you can inspect the commit
+before it becomes permanent; `--yes` skips the confirmation for unattended use.
+Nothing before the push leaves your machine, and the script prints the exact
+`git tag -d` / `git reset` to undo it.
+
 ## License of contributions
 
 Unless you state otherwise, any contribution you submit is dual licensed under

@@ -60,6 +60,12 @@ Commits go directly to `main`. No PR flow; treat the commit message as the revie
 
 Before pushing, run the full check (build/test/clippy/fmt) with **both** feature configs. If you touched anything in `crates/actus-server/src/server.rs`, `crates/actus-server/src/middleware/`, or the routing in `crates/actus-controller/src/lib.rs`, also smoke-test `examples/basic` end-to-end with `cargo run -p actus-basic-example` + `curl`.
 
+### Releasing
+
+`./scripts/release.sh <major|minor|patch>` — computes the version from the manifest, bumps it, cuts the CHANGELOG, gates, commits, tags, pushes. (An explicit `X.Y.Z` is accepted for a prerelease or a deliberate skip.) **Pushing the tag is what publishes**: `.github/workflows/release.yml` fires on `v*` and uploads all five crates via crates.io Trusted Publishing (GitHub OIDC → a 30-minute token; no stored registry token, and none on any laptop). Don't publish by hand — `cargo publish` from a workstation bypasses the gate and the version/tag agreement check.
+
+Pick the bump from the `[Unreleased]` entries: new public API is **minor**, fixes and docs are **patch**. The script refuses an empty `[Unreleased]`, a dirty tree, a non-default branch, a version that doesn't move forward, and an existing tag. Full description: `CONTRIBUTING.md` → Releasing.
+
 ## Principles
 
 These shape how Actus is designed *and* how it should be extended. They are the failure-mode hedge: the patterns Actus uses are not the same as other Rust web frameworks, and the path to wrong design changes is usually "I reflexively imported a pattern from somewhere else."

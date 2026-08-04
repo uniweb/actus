@@ -1,0 +1,94 @@
+name: Release
+
+# Fires on a version tag pushed by `./scripts/release.sh`. Gates once more, then
+# publishes all five crates to crates.io and opens a GitHub Release.
+#
+# Authentication is crates.io **Trusted Publishing**: `crates-io-auth-action`
+# trades this workflow's GitHub OIDC identity for a token that lives 30 minutes
+# and is revoked when the job ends. There is no long-lived token in the repo
+# secrets and none on any laptop.
+#
+# ONE-TIME SETUP (per crate, on crates.io → crate → Settings → Trusted Publishing):
+#   Repository owner  uniweb
+#   Repository name   actus
+#   Workflow filename release.yml
+#   Environment       (leave empty — this workflow declares none; see below)
+# Needed for all five: actus, actus-server, actus-controller,
+# actus-controller-macros, actus-reply.
+#
+# To gate releases behind a required reviewer, create a GitHub Environment
+# (e.g. `release`), add `environment: release` to the publish job, and put that
+# same name in each crate's Trusted Publishing config. The name must match on
+# both sides or the token exchange is refused.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# NO gate job here, deliberately. The tagged commit is pushed to the default
+# branch first, so ci.yml (fmt · clippy · tests, both feature configs · MSRV ·
+# cargo-deny) is already running on this exact tree, and `release.sh` ran the
+# same matrix locally before the tag existed. A third copy would run in parallel
+# with ci.yml on identical bytes and prove nothing. What is NOT covered
+# elsewhere is checked below: the tag agreeing with the manifest, and
+# `cargo publish` building every crate from its packaged tarball.
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # mint the OIDC token Trusted Publishing exchanges
+      contents: write   # open the GitHub Release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag naming a version the manifest doesn't carry means the tag landed
+      # on the wrong commit. Catch it before anything is uploaded — crates.io
+      # versions are permanent.
+      - name: Tag matches the manifest version
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="actus"))')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag manifest=$manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $manifest"
+            exit 1
+          fi
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # --workspace publishes all five in dependency order (macros → reply →
+      # controller → server → actus), verifying each against the packaged form
+      # of its dependencies. Both examples are `publish = false` and are skipped.
+      - name: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace
+
+      # Release notes are the CHANGELOG section for this version — the lines
+      # between this version's heading and the next one.
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$version]" '
+            $0 == v      { grab = 1; next }
+            /^## \[/     { if (grab) exit }
+            grab         { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Actus $version" \
+            --notes-file notes.md \
+            --verify-tag
