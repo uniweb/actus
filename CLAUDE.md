@@ -52,7 +52,7 @@ cargo clippy --all-targets --features actus/compression,actus/websocket,actus/op
 
 ## Workflow
 
-Commits go directly to `master`. No PR flow; treat the commit message as the review record:
+Commits go directly to `main`. No PR flow; treat the commit message as the review record:
 
 - Subject: tight, imperative, scoped (`fix(server): …`, `feat: …`, `docs: …`, …).
 - Body: what changed *and why*. Call out breaking changes explicitly.
