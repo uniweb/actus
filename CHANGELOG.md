@@ -10,6 +10,8 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+## [1.3.0]
+
 ### Added
 
 - **Route families, Phase 2 — the compile-time half.** `app_routes!` accepts a
@@ -135,7 +137,8 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/uniweb/actus/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/uniweb/actus/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/uniweb/actus/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/uniweb/actus/compare/v1.0.0...v1.0.1
