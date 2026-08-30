@@ -455,7 +455,9 @@ stamp site.
   is a **major** change under Cargo's SemVer rules. Marking it `#[non_exhaustive]`
   now is equally breaking, for the same reason.
 
-⭐ **The finding is larger than this proposal, and worth recording on its own:**
+⭐ **The finding is larger than this proposal, and is now recorded on its own** in
+[`../2.0-docket.md`](../2.0-docket.md) — it turned out to apply to every public type,
+not just `Request`:
 `Request` cannot receive *any* new routing-derived projection during `1.x`.
 `rate_limit_class` got in before the freeze; nothing can follow it. Every future
 "stamp the matched route's X onto the request" idea is now a `2.0` item. The 1.0
@@ -463,7 +465,8 @@ freeze audit did not surface this, because it reviewed the *shape* of the public
 surface rather than its *extensibility*.
 
 ⇒ **Recommendation: ship Phase 1 without the stamp, and put `#[non_exhaustive]` on
-`Request` plus the `audience` field on the `2.0` docket as one item.** The boot-built
+`Request` plus the `audience` field on the [`2.0` docket](../2.0-docket.md) as one
+item.** The boot-built
 map above is a working gate in the meantime, and the day a `2.0` happens the wart
 disappears without the application changing its middleware's logic — only where it
 reads the label from.
@@ -635,7 +638,8 @@ insists on the claim; the application supplies the probe that checks it.**
    alternative is every consumer independently discovering that their auth controller
    does not fit.
 
-8. **Do the stamp and `#[non_exhaustive]` go on the `2.0` docket as one item?** The
+8. **Do the stamp and `#[non_exhaustive]` go on the [`2.0` docket](../2.0-docket.md)
+   as one item?** The
    [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path) finding
    says `Request` can take no new framework-populated field during `1.x`. If that is
    accepted, the `2.0` list starts here and this is its first entry — and it is worth

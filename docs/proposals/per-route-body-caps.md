@@ -1,9 +1,24 @@
 # Proposal: per-route body caps
 
-**Status:** Phase 1 (controller-only) shipped (2026-05-13); Phase 2 (per-route override) deferred pending real-usage feedback.
-**Scope:** pre-1.0 API addition
+**Status:** Phase 1 (controller-only) shipped (2026-05-13); Phase 2 (per-route override) deferred pending real-usage feedback — **and, since 1.0, additionally blocked: it is no longer an additive change** (see the 2026-08-30 correction below).
+**Scope:** pre-1.0 API addition. ⚠️ Phase 2 would now be a **`2.0`** change.
 
 > **2026-05-13 update.** The discussion landed on shipping Phase 1 only — a per-controller cap via `#[controller(max_body = N)]`. Phase 2's per-route override is a purely additive change on top (the lifecycle reorder is already done, `RouteDef.max_body` would just add a new field, etc.) — but we don't ship it speculatively. The plan: see whether a real consumer hits the "wide-body endpoint nested under a `{param}` parent" pattern that the controller-only design handles awkwardly. If yes, we ship per-route. If not, we never do. The rest of this doc is the original draft, kept as the design record.
+
+> ⚠️ **Correction, 2026-08-30 — "purely additive" is no longer true.** The sentence
+> above was written pre-1.0 and was correct then. It is not correct now: `RouteDef`
+> carries six fields, **all `pub`**, with no private field and no
+> `#[non_exhaustive]`, so **adding `max_body` to it is a breaking change** under
+> Cargo's SemVer rules (a downstream struct literal stops compiling). Phase 2 is
+> therefore a **`2.0`** item, not a minor one. Nothing about the *design* below
+> changes — only what it costs to ship.
+>
+> This is not specific to this proposal: **no public enum or all-public struct in the
+> workspace is `#[non_exhaustive]`**, so the whole data model is closed to extension
+> until a major. The finding, what it blocks, and the sweep that would repair it are
+> in [`../2.0-docket.md`](../2.0-docket.md) — which is also where this item is queued.
+> ⛔ Do not re-derive "it's just a new field, so it's additive" from the note above;
+> that reasoning was retired by the 1.0 freeze.
 
 ---
 

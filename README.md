@@ -1016,7 +1016,7 @@ What's there today:
 
 ### Stability
 
-Actus is **1.0** — an API-stability commitment. Breaking changes now go through a `2.0`, and any breaking change is called out in the [changelog](CHANGELOG.md) so a `cargo update` within `1.x` is never a silent surprise. Minor releases add features; patch releases are bug-fix-only.
+Actus is **1.0** — an API-stability commitment. Breaking changes now go through a `2.0`, and any breaking change is called out in the [changelog](CHANGELOG.md) so a `cargo update` within `1.x` is never a silent surprise. Minor releases add features; patch releases are bug-fix-only. What a future major would carry — and what the freeze closed off, which is more than names — is tracked in [`docs/2.0-docket.md`](docs/2.0-docket.md); none of it is scheduled.
 
 1.0 was earned, not declared:
 
