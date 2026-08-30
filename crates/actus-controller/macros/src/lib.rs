@@ -105,6 +105,13 @@ struct ControllerAttrs {
     /// rate-limit middleware maps class → limits (see the `Controller`
     /// trait's `actus_rate_limit` docs).
     rate_limit: Option<syn::Expr>,
+    /// `#[controller(expects = <expr>)]` — the controller's declared caller
+    /// expectation (an `&'static str`), a *floor*: the least-privileged
+    /// caller it is written to accept. `None` means the controller declares
+    /// nothing — which is a visible row in `Router::mounts()`, not a skip.
+    /// A label, not a policy (see the `Controller` trait's `actus_expects`
+    /// docs).
+    expects: Option<syn::Expr>,
 }
 
 // =========================
@@ -200,6 +207,7 @@ impl Parse for ControllerAttrs {
         let mut prepare = None;
         let mut max_body_bytes = None;
         let mut rate_limit = None;
+        let mut expects = None;
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -226,11 +234,18 @@ impl Parse for ControllerAttrs {
                     // policy: the app's rate-limit middleware maps it to limits.
                     rate_limit = Some(input.parse()?);
                 }
+                "expects" => {
+                    input.parse::<Token![=]>()?;
+                    // Same contract as `rate_limit`: any expression evaluating
+                    // to `&'static str`. The value is opaque to the framework —
+                    // a floor the application's coverage check and gate read.
+                    expects = Some(input.parse()?);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         ident.span(),
                         "Expected 'strict', 'lax', 'prepare = <fn>', 'max_body_bytes = <expr>', \
-                         or 'rate_limit = <expr>'",
+                         'rate_limit = <expr>', or 'expects = <expr>'",
                     ));
                 }
             }
@@ -245,6 +260,7 @@ impl Parse for ControllerAttrs {
             prepare,
             max_body_bytes,
             rate_limit,
+            expects,
         })
     }
 }
@@ -401,8 +417,10 @@ fn collect_method_docs(item_impl: &syn::ItemImpl) -> BTreeMap<String, String> {
 /// extraction, and dispatch. Attribute options: `prepare = Self::method` (a
 /// hook run before every handler in the controller), `lax` (relax strict
 /// parameter rejection), `rate_limit = "class"` (stamp a rate-limit class onto
-/// matched requests), and `max_body_bytes = N` (per-controller request-body cap, in
-/// bytes).
+/// matched requests), `max_body_bytes = N` (per-controller request-body cap, in
+/// bytes), and `expects = "floor"` (declare the least-privileged caller this
+/// controller accepts — surfaced by `Router::mounts()` for route-family
+/// coverage checks).
 #[proc_macro_attribute]
 pub fn controller(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attributes (strict/lax mode, prepare function)
@@ -412,6 +430,7 @@ pub fn controller(attr: TokenStream, item: TokenStream) -> TokenStream {
             prepare: None,
             max_body_bytes: None,
             rate_limit: None,
+            expects: None,
         }
     } else {
         match syn::parse::<ControllerAttrs>(attr) {
@@ -665,6 +684,36 @@ fn generate_controller_impl(
         }
     });
 
+    // `#[controller(expects = "floor")]` — emit an `actus_expects` override
+    // returning `Some("floor")`. When not set, the trait's default impl
+    // returns `None`, and `Router::mounts()` reports the absence as a row —
+    // absence being representable is the point of the route-family design.
+    let expects_impl = attrs.expects.as_ref().map(|expr| {
+        quote! {
+            fn actus_expects(&self) -> ::core::option::Option<&'static str> {
+                ::core::option::Option::Some(#expr)
+            }
+        }
+    });
+
+    // `#[controller(prepare = Self::auth)]` — additionally surface the hook's
+    // *presence* (and its written path, for route dumps) via `actus_prepare`,
+    // so a route-family coverage check can enforce rules like "a credential
+    // floor requires a hook". The hook itself is still compiled directly into
+    // `actus_dispatch` above; this is introspection, not an invocation handle.
+    let prepare_impl = attrs.prepare.as_ref().map(|prepare_fn| {
+        // Same tokens-to-text idiom as `type_to_string`: `quote!` needs no
+        // `ToTokens` import, and stripping spaces turns the token-stream
+        // rendering `Self :: auth` into the written form `Self::auth`.
+        let path_str = quote!(#prepare_fn).to_string().replace(' ', "");
+        let path_lit = syn::LitStr::new(&path_str, proc_macro2::Span::call_site());
+        quote! {
+            fn actus_prepare(&self) -> ::core::option::Option<&'static str> {
+                ::core::option::Option::Some(#path_lit)
+            }
+        }
+    });
+
     // Generate main Controller trait implementation
     let controller_impl = quote! {
         #[::actus::__internal::async_trait]
@@ -711,6 +760,8 @@ fn generate_controller_impl(
 
             #max_body_bytes_impl
             #rate_limit_impl
+            #expects_impl
+            #prepare_impl
         }
     };
 

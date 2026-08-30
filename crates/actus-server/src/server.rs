@@ -107,6 +107,30 @@ impl Server {
         }
     }
 
+    /// The router this server serves, shared.
+    ///
+    /// Lets application code keep using the route tree after `Server::new`
+    /// has consumed it — most usefully from a `Middleware` that wants the
+    /// framework's own longest-prefix matcher instead of re-deriving it. A
+    /// declaration-keyed gate is the motivating case:
+    ///
+    /// ```ignore
+    /// let server = Server::new(router);
+    /// let router = server.router(); // Arc<Router>
+    /// let server = server.with_middleware(FloorGate { router });
+    /// // …in the gate's `before`:
+    /// //   if let Some(rm) = self.router.match_controller(&req.path_parts) {
+    /// //       if rm.controller.actus_expects() == Some("credential") && … { … }
+    /// //   }
+    /// ```
+    ///
+    /// The clone is an `Arc` clone; a gate's extra `match_controller` call is
+    /// one map lookup per path segment on top of the one the server already
+    /// does. See the README's "Route families" section for the full pattern.
+    pub fn router(&self) -> Arc<Router> {
+        Arc::clone(&self.router)
+    }
+
     /// Adds a middleware to the server's request processing chain.
     pub fn with_middleware(mut self, middleware: impl Middleware + 'static) -> Self {
         let mut chain = Arc::try_unwrap(self.middleware_chain).unwrap_or_else(|arc| (*arc).clone());

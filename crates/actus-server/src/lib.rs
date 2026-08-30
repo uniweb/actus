@@ -26,7 +26,7 @@ pub use cors::CorsLayer;
 pub use error::ServerError;
 pub use middleware::{Middleware, MiddlewareChain, Outcome, RequestLogger};
 pub use request::Request;
-pub use router::{RateLimitClass, Router, RouterBuilder};
+pub use router::{Mount, RateLimitClass, Router, RouterBuilder};
 pub use server::{DEFAULT_MAX_BODY_BYTES, GIB, KIB, MIB, Server};
 #[cfg(feature = "websocket")]
 pub use websocket::{Message, WebSocket};

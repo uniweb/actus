@@ -146,7 +146,7 @@ pub use actus_reply::Finalizer;
 // Re-exported at the crate root so the `app_routes!` macro can resolve
 // `::actus::Router` / `::actus::RouterBuilder` from generated code without
 // requiring downstream crates to depend on `actus-server` directly.
-pub use actus_server::{GIB, KIB, MIB, RateLimitClass, Router, RouterBuilder, Server};
+pub use actus_server::{GIB, KIB, MIB, Mount, RateLimitClass, Router, RouterBuilder, Server};
 
 /// WebSocket support — [`ws::upgrade`], [`ws::WebSocket`], [`ws::Message`].
 /// Available with the `websocket` feature.
@@ -196,8 +196,8 @@ pub mod prelude {
     #[cfg(feature = "websocket")]
     pub use crate::ws;
     pub use actus_server::{
-        CorsLayer, GIB, KIB, MIB, Middleware, Outcome, RateLimitClass, Request, RequestLogger,
-        Router, RouterBuilder, Server, ServerError,
+        CorsLayer, GIB, KIB, MIB, Middleware, Mount, Outcome, RateLimitClass, Request,
+        RequestLogger, Router, RouterBuilder, Server, ServerError,
     };
     // Re-exported so handlers can declare `body: Bytes` in `routes!`
     // without an extra `use bytes::Bytes;` line. There is one canonical

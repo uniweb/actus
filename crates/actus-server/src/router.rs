@@ -45,6 +45,43 @@ pub struct RateLimitClass {
     pub class: &'static str,
 }
 
+/// One mounted controller's declarations — a row of [`Router::mounts`], the
+/// per-mount inventory.
+///
+/// Framework-populated: application code reads these rows, it never
+/// constructs them — which is why the struct is `#[non_exhaustive]` and can
+/// grow new fields in minor releases. Destructure with `..` or read fields
+/// directly.
+///
+/// Unlike [`Router::rate_limit_classes`], the inventory emits a row for
+/// **every** mounted controller: a controller that declared nothing appears
+/// with `expects: None` / `prepare: None`, because for route-family coverage
+/// the *omission* is the interesting case and has to be representable before
+/// it can be caught.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mount {
+    /// The controller's mount path — slash-joined segments, no leading or
+    /// trailing slash; `""` for a root (or `"*"`) mount. Same convention as
+    /// [`Router::routes`].
+    pub mount: String,
+    /// The controller's type name ([`Controller::__name`]).
+    pub controller: &'static str,
+    /// The declared caller expectation — the controller's *floor* — from
+    /// `#[controller(expects = "…")]`. `None` means the controller declared
+    /// nothing.
+    pub expects: Option<&'static str>,
+    /// The `prepare` hook's written path (e.g. `"Self::auth"`) from
+    /// `#[controller(prepare = …)]`, or `None` when there is no hook.
+    /// Presence is the payload; the string is for route dumps.
+    pub prepare: Option<&'static str>,
+    /// The declared rate-limit class from `#[controller(rate_limit = "…")]`.
+    pub rate_limit_class: Option<&'static str>,
+    /// The per-controller body cap from `#[controller(max_body_bytes = …)]`;
+    /// `None` means the controller defers to the server-wide cap.
+    pub max_body_bytes: Option<usize>,
+}
+
 /// The Actus router. Dispatches requests to controllers by longest-prefix
 /// match over the route tree at arbitrary depth.
 pub struct Router {
@@ -172,6 +209,15 @@ impl Router {
     /// two at startup and assert every declared class is covered. That turns a
     /// typo'd class (`"ath"` for `"auth"`) into a boot failure instead of a
     /// silently-unlimited controller. One tree walk; no per-request cost.
+    ///
+    /// ⚠️ **Emptiness asymmetry.** This method catches a *misspelling* and is
+    /// blind to an *omission*: a controller that declared no class produces no
+    /// row here, so nothing can notice its absence. For rate limiting that is
+    /// usually fine (an unlimited controller is usually intended). When the
+    /// omission itself is the failure you're checking for — route-family
+    /// coverage — use [`Router::mounts`], which emits a row for every mounted
+    /// controller, declared or not. (This method keeps its historical shape;
+    /// `mounts()` is the absence-inclusive inventory.)
     pub fn rate_limit_classes(&self) -> Vec<RateLimitClass> {
         let mut out = Vec::new();
         let mut prefix: Vec<String> = Vec::new();
@@ -193,6 +239,51 @@ impl Router {
         for (seg, child) in children {
             prefix.push(seg.clone());
             Self::walk_classes(child, prefix, out);
+            prefix.pop();
+        }
+    }
+
+    /// Walk the route tree and return one [`Mount`] row per mounted
+    /// controller — the per-mount inventory: mount path, controller name,
+    /// declared caller expectation (*floor*), `prepare` hook presence,
+    /// rate-limit class, and body cap.
+    ///
+    /// **Absence is a row, not a skip.** A controller that declared nothing
+    /// appears with `expects: None`, which is what makes a route-family
+    /// coverage check possible: the check's job is precisely to catch the
+    /// controller that silently declared nothing under a prefix whose other
+    /// controllers all did. (Contrast [`Router::rate_limit_classes`], which
+    /// emits only declaring controllers.)
+    ///
+    /// Order is a deterministic DFS (children sorted), matching
+    /// [`Router::routes`]; `mount` follows the same convention (`""` for a
+    /// root mount). One tree walk; no per-request cost. Typical use: a
+    /// startup coverage check in `main()`, a route dump, or building a
+    /// `mount → floor` map for a declaration-keyed gate — see the README's
+    /// "Route families" section.
+    pub fn mounts(&self) -> Vec<Mount> {
+        let mut out = Vec::new();
+        let mut prefix: Vec<String> = Vec::new();
+        Self::walk_mounts(&self.root, &mut prefix, &mut out);
+        out
+    }
+
+    fn walk_mounts(node: &RouteNode, prefix: &mut Vec<String>, out: &mut Vec<Mount>) {
+        if let Some(controller) = &node.controller {
+            out.push(Mount {
+                mount: prefix.join("/"),
+                controller: controller.__name(),
+                expects: controller.actus_expects(),
+                prepare: controller.actus_prepare(),
+                rate_limit_class: controller.actus_rate_limit(),
+                max_body_bytes: controller.actus_max_body_bytes(),
+            });
+        }
+        let mut children: Vec<(&String, &RouteNode)> = node.children.iter().collect();
+        children.sort_by(|a, b| a.0.cmp(b.0));
+        for (seg, child) in children {
+            prefix.push(seg.clone());
+            Self::walk_mounts(child, prefix, out);
             prefix.pop();
         }
     }
@@ -611,6 +702,98 @@ mod tests {
                 .iter()
                 .all(|rlc| rlc.mount != "api/health"),
         );
+    }
+
+    /// A controller that declares everything — overrides the metadata
+    /// methods the way the `#[controller(...)]` macro would, without
+    /// depending on the macro in this crate.
+    struct Declared;
+
+    #[actus_controller::async_trait]
+    impl Controller for Declared {
+        async fn actus_dispatch(&self, _action: &str, _params: Params) -> Reply {
+            Err(WebError::NotFound)
+        }
+        fn __name(&self) -> &'static str {
+            "declared"
+        }
+        fn actus_expects(&self) -> Option<&'static str> {
+            Some("credential")
+        }
+        fn actus_prepare(&self) -> Option<&'static str> {
+            Some("Self::auth")
+        }
+        fn actus_rate_limit(&self) -> Option<&'static str> {
+            Some("auth")
+        }
+        fn actus_max_body_bytes(&self) -> Option<usize> {
+            Some(4096)
+        }
+    }
+
+    #[test]
+    fn mounts_emits_a_row_for_every_controller_including_undeclared() {
+        // THE regression test for the blind spot the inventory exists to fix:
+        // `rate_limit_classes()` skips controllers that declared nothing, so
+        // an omission is invisible there. `mounts()` must emit a row for the
+        // undeclared controller (`Spy` overrides no metadata method), with
+        // every declaration field `None` — absence as data, not as a skip.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let router = RouterBuilder::new()
+            .add_route("api/things", Arc::new(Declared))
+            .add_route(
+                "api/undeclared",
+                Arc::new(Spy {
+                    path: "undeclared".into(),
+                    log: log.clone(),
+                }),
+            )
+            .build();
+
+        assert_eq!(
+            router.mounts(),
+            vec![
+                Mount {
+                    mount: "api/things".to_string(),
+                    controller: "declared",
+                    expects: Some("credential"),
+                    prepare: Some("Self::auth"),
+                    rate_limit_class: Some("auth"),
+                    max_body_bytes: Some(4096),
+                },
+                Mount {
+                    mount: "api/undeclared".to_string(),
+                    controller: "spy",
+                    expects: None,
+                    prepare: None,
+                    rate_limit_class: None,
+                    max_body_bytes: None,
+                },
+            ],
+            "one row per mounted controller, sorted-DFS order, absences included",
+        );
+    }
+
+    #[test]
+    fn mounts_reports_a_root_mount_as_the_empty_string() {
+        // Same mount-path convention as `routes()`: a `"*"` (or `""`) mount
+        // is the root, reported as `""` — the coverage-check convention
+        // `mount.split('/').next()` then yields `""`, which no family
+        // prefix matches, so a root catch-all is naturally unconstrained.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let router = RouterBuilder::new()
+            .add_route(
+                "*",
+                Arc::new(Spy {
+                    path: "spa".into(),
+                    log: log.clone(),
+                }),
+            )
+            .build();
+        let rows = router.mounts();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mount, "");
+        assert_eq!(rows[0].expects, None);
     }
 
     #[tokio::test]

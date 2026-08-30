@@ -10,6 +10,35 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **Route families, Phase 1** — a coverage mechanism for client-segregated
+  route surfaces; coverage, not authorization (README § "Route families";
+  design record `docs/proposals/route-family-contracts.md`):
+  - `#[controller(expects = "…")]` declares the controller's caller **floor**
+    — the least-privileged caller it is written to accept. An opaque
+    `&'static str` the framework never interprets; surfaced as
+    `Controller::actus_expects()` (defaulted, so every existing controller
+    keeps compiling).
+  - `Controller::actus_prepare()` — the `prepare` hook's presence (and its
+    written path, e.g. `"Self::auth"`), so a coverage rule can require *"a
+    `"credential"` floor has a hook to resolve one"*.
+  - `Router::mounts()` — the per-mount inventory: one `Mount` row (mount
+    path, controller name, `expects`, `prepare`, rate-limit class, body cap)
+    for **every** mounted controller, absences included — the omission is a
+    row, not a skip, which is what makes a coverage check able to catch it.
+    `Mount` is `#[non_exhaustive]` and can grow fields in minor releases.
+    (`Router::rate_limit_classes()` keeps its declaring-only shape; its
+    rustdoc now documents the asymmetry and points at `mounts()`.)
+  - `Server::router()` — shares the served route tree (`Arc<Router>`), so
+    application middleware can use the framework's own longest-prefix
+    matcher — e.g. a declaration-keyed gate reading
+    `match_controller(...).controller.actus_expects()` — instead of
+    re-deriving the routing.
+  - `examples/advanced` grows the worked example: `family_coverage` (boot
+    check, wired into `--check`), a `FloorGate` middleware, and unit +
+    integration tests for both.
+
 ## [1.1.0]
 
 ### Added

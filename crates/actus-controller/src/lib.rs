@@ -878,6 +878,45 @@ pub trait Controller: Send + Sync {
     fn actus_rate_limit(&self) -> Option<&'static str> {
         None
     }
+
+    /// The controller's declared caller expectation, as set by
+    /// `#[controller(expects = "…")]`. `None` (the default) means the
+    /// controller declared nothing.
+    ///
+    /// This is a **label, not a policy** — and specifically a **floor**: it
+    /// names the *least-privileged caller the controller is written to
+    /// accept* (`"credential"`, `"anonymous"`, `"signature"`, …). It is not a
+    /// ceiling — individual routes may demand more in their handlers — and it
+    /// is not authorization: Actus never interprets the value, compares it
+    /// only for presence/equality in application code, and hands it back
+    /// untouched. What each label *means*, and what happens to a caller below
+    /// the floor, is entirely the application's (typically: a startup
+    /// coverage check over [`Router::mounts`], a declaration-keyed gate in a
+    /// `prepare` hook or middleware, and a probe test — see the README's
+    /// "Route families" section).
+    ///
+    /// Resolution is per-controller, mirroring
+    /// [`Controller::actus_rate_limit`]. A controller with routes above its
+    /// floor declares the floor and enforces the stricter routes in their
+    /// handlers.
+    ///
+    /// [`Router::mounts`]: https://docs.rs/actus-server/latest/actus_server/struct.Router.html#method.mounts
+    fn actus_expects(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The path of the controller's `prepare` hook, as written in
+    /// `#[controller(prepare = …)]` (e.g. `"Self::auth"`), or `None` when the
+    /// controller declared no hook.
+    ///
+    /// **Presence is the payload.** A route-family coverage check reads this
+    /// to enforce rules like *"a controller whose floor is `"credential"`
+    /// must have a hook to refuse anonymous callers with"* — the string
+    /// itself is a courtesy for route dumps and diagnostics, not an
+    /// invocation handle.
+    fn actus_prepare(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// A list of `(mount, controller-factory)` pairs — the route-registration
