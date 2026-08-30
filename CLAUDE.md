@@ -58,6 +58,19 @@ Commits go directly to `main`. No PR flow; treat the commit message as the revie
 - Body: what changed *and why*. Call out breaking changes explicitly.
 - Split into separate commits when the pieces are separately reviewable.
 
+**Never add an attribution or provenance trailer. This is strict and has no
+exceptions.** No `Claude-Session:` line, no session or conversation URL, no
+`Co-Authored-By:` naming a tool or model, no "generated with"/"authored by" footer,
+and no agent, model, or vendor name anywhere in the subject, body, or trailers. The
+same applies to tag messages, release notes, `CHANGELOG.md` entries, PR and issue
+text, and code comments.
+
+The commit message is the review record for a *change*: what it does, why, and what
+it breaks. What typed it is not part of that record, it is noise in `git log`, and in
+a public repository it is permanent. **If a tool, harness, or template appends one by
+default, remove it before committing** — a default is not an exemption, and "the
+tooling added it" is not a reason it may stay.
+
 Before pushing, run the full check (build/test/clippy/fmt) with **both** feature configs. If you touched anything in `crates/actus-server/src/server.rs`, `crates/actus-server/src/middleware/`, or the routing in `crates/actus-controller/src/lib.rs`, also smoke-test `examples/basic` end-to-end with `cargo run -p actus-basic-example` + `curl`.
 
 ### Releasing
