@@ -196,6 +196,20 @@ else
   _warn "cargo-deny not installed — skipped locally (CI enforces it). Install: cargo install cargo-deny"
 fi
 
+# The stability promise, machine-checked against the last crates.io release.
+# The manifest is already bumped at this point, so cargo-semver-checks derives
+# the release type from the actual version change: a `patch` release with new
+# API fails here, and a `minor` release with a breaking change fails here.
+# (ci.yml runs the looser `release-type: minor` form on every push; this is the
+# exact one.) Skipped when the tool is absent — CI is the authority.
+if command -v cargo-semver-checks >/dev/null 2>&1; then
+  _step "Gate: cargo-semver-checks (against crates.io, release type from the bump)"
+  cargo semver-checks --workspace --all-features
+  _ok "semver-checks"
+else
+  _warn "cargo-semver-checks not installed — skipped locally (CI enforces it). Install: cargo install cargo-semver-checks --locked"
+fi
+
 # The authoritative packaging check: builds each crate from its *packaged*
 # tarball against a temp registry, in dependency order. This is what catches a
 # missing `version` on an internal dep or a file the package excludes.

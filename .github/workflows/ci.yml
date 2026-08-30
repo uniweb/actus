@@ -71,3 +71,20 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The 1.0 stability promise, machine-checked: every crate's public API is
+  # diffed against its latest crates.io release. `release-type: minor` because
+  # `main` legitimately accumulates additive (minor-level) API between
+  # releases; what must never appear on a 1.x `main` is a MAJOR-level change —
+  # a removed item, a changed signature, a new field on an all-`pub` struct.
+  # `release.sh` runs the stricter form (the release type derived from the
+  # actual version bump) before a tag exists. See docs/2.0-docket.md §3.
+  semver:
+    name: cargo-semver-checks (no breaking change since the last release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          release-type: minor
+          feature-group: all-features
