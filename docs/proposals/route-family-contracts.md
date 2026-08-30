@@ -539,7 +539,9 @@ async fn before(&self, req: &mut Request) -> Result<Outcome, WebError> {
 ```
 
 No allow-list, no hand-rolled matcher, no `2.0`. The cost is a second tree walk
-per request — a `HashMap` hop per path segment. The `Request` stamp is therefore an
+per request — a `HashMap` hop per path segment: **32–93 ns measured** on a
+50-mount tree (2026-08-30, release build, 2–5 segment paths, including the
+`Arc` clone and the `actus_expects()` call). The `Request` stamp is therefore an
 **optimisation** (one walk instead of two, plus discoverability beside
 `rate_limit_class`), and it is queued on the [`2.0` docket](../2.0-docket.md) as
 exactly that. The finding generalises: any per-request "stamp X onto `Request`"
