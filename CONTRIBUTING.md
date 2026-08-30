@@ -104,8 +104,9 @@ the release script refuses an empty `[Unreleased]`.
 It bumps the workspace version and the five internal dependency pins, cuts
 `[Unreleased]` in `CHANGELOG.md` to the new version, refreshes `Cargo.lock`,
 runs the full gate (fmt · clippy · tests, both feature configs · MSRV ·
-`cargo publish --workspace --dry-run`), then commits, tags, and — after one
-confirmation — pushes.
+cargo-deny · cargo-semver-checks against the last crates.io release, with the
+release type derived from the bump · `cargo publish --workspace --dry-run`),
+then commits, tags, and — after one confirmation — pushes.
 
 **Pushing the tag is what publishes.** `.github/workflows/release.yml` fires on
 `v*`, uploads all five crates, and opens a GitHub Release from the CHANGELOG
