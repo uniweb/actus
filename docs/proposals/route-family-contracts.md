@@ -2,15 +2,20 @@
 
 **Owner:** Diego Macrini
 
-**Status:** PROPOSAL — 2026-08-30. Nothing here has shipped. Two phases, separately
-shippable; Phase 1 stands alone and solves the reported problem, Phase 2 moves the
-same check from boot to compile time.
-**Scope:** post-1.0 API addition. Both phases are **purely additive** — a trait
-method with a default body, a `Router` method, a `#[controller]` attribute key, and
-an optional `app_routes!` block. Neither needs a `2.0`. One refinement does, and
-is queued rather than folded in: stamping the audience onto `Request`
-(§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)) — the
-reason is a finding about the 1.0 surface that outlives this proposal.
+**Status:** PROPOSAL v2 — 2026-08-30. Nothing here has shipped. Revised the same day as v1
+after an adversarial review that re-derived every checkable claim against the code and
+re-verified the consumer premises in the consumer; the eight questions v1 left open are
+**decided** below, and the review's corrections are folded in (the running errors list is in
+[For a reviewer](#for-a-reviewer--what-to-attack-and-what-you-can-check)).
+Two phases, separately shippable; Phase 1 stands alone and solves the reported problem,
+Phase 2 moves the *presence* half of the same check from boot to compile time.
+**Scope:** post-1.0 API addition. Everything in both phases is **purely additive** — a
+defaulted trait method or two, one `#[non_exhaustive]` struct, a `Router` method, a `Server`
+accessor, a `#[controller]` attribute key, and an optional `app_routes!` block. Neither
+phase needs a `2.0`. The per-request stamp v1 queued for `2.0` turned out to be an
+**optimisation, not a capability** — the capability is reachable additively
+(§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)), which
+also shrinks the corresponding [`2.0` docket](../2.0-docket.md) entry.
 
 ---
 
@@ -41,7 +46,11 @@ checkable invariants instead of per-endpoint hopes.
 
 **Except nothing checks them.** A new controller is mounted under `api/` and simply
 does not do the thing every other controller under `api/` does. It compiles, it
-serves, and it is wrong. This has happened in production.
+serves, and it is wrong. This has happened in production — and the incident was
+re-examined for v2: the failure was **precisely an omission** (a controller on a
+credentialed family that declared nothing, and served anonymous callers its full
+payload), not a wrongly-written policy. That distinction matters, because it is the
+omission this design catches.
 
 Three properties make the omission invisible, and all three are structural rather
 than anyone's carelessness:
@@ -64,14 +73,39 @@ the framework already built — which is why, in practice, nobody does.
 
 ### The measurement that prompted this
 
-In the production consumer, measured 2026-08-30 (re-run with a `#[controller` grep
-over its controller modules): 47 `#[controller]` attributes across 49 controller
-modules. 36 declare a `prepare` hook; **11 declare none**. All 11 are legitimate —
-the anonymous content lanes, the webhook receiver, the SPA shell, and one
-deliberately-anonymous discovery route sitting inside an otherwise-authenticated
-family. But establishing that took grepping 49 files and hand-joining the result
-against a mount table two hundred lines long in a different file. **That join
-exists nowhere in the codebase, in any form, for any reader.**
+In the production consumer (measured 2026-08-30): roughly fifty mounted
+controllers; about three-quarters share one permissive `prepare` hook; around a
+dozen deliberately declare nothing — the anonymous content lanes, the SPA shell,
+the signature-authed webhook receiver, a few dev-only surfaces with their own
+guard. Establishing that took grepping every controller module and hand-joining
+the result against a mount table two hundred lines long in a different file.
+**That join exists nowhere in the codebase, in any form, for any reader.**
+
+⚠️ **Do not trust the counts; trust the story of the counts.** The number was
+corrected **twice on the day it was first taken** — once because the grep required
+a parenthesis and missed bare `#[controller]`, once because closing the motivating
+incident changed it. A figure nobody can keep accurate for a single day is the
+measurement: the inventory this proposal adds is the only way the join stays true.
+
+## The label is a floor
+
+One definition carries the whole design, so it comes before the mechanism:
+
+> **The label names the least-privileged caller the controller is written to
+> accept.** It is a *floor*, not a ceiling and not a policy. A controller labelled
+> `"credential"` refuses anonymous callers somewhere; a controller labelled
+> `"anonymous"` accepts them — and says nothing about whether some of its routes
+> demand more, which stays the handlers' business exactly as today.
+
+Two consequences, both load-bearing later:
+
+- A **green coverage check reads correctly**: "every controller stated its floor,
+  and every floor is one its family accepts." Nobody can read a floor as "auth is
+  enforced," because a floor visibly is not a ceiling. This is the honest version
+  of the guarantee; see [What it does NOT solve](#what-it-does-not-solve).
+- The **genuinely mixed controller fits without contortion** — it declares its
+  weakest route's floor. See
+  [The mixed controller](#the-mixed-controller-the-label-is-the-floor).
 
 ## What it does NOT solve
 
@@ -87,8 +121,43 @@ individual handlers, because it is resource-aware and belongs there. So even
 authentication" — which is exactly why the mechanism below deals in **declarations**
 and never in **semantics**.
 
-What closes the remaining distance is a test, not a static check — and the proposal
-makes that test *possible*; see [Second-order win](#second-order-win-the-claim-becomes-falsifiable).
+What closes the remaining distance is enforcement wired to the declaration
+(§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)) plus a
+test the declaration makes possible
+(§ [Second-order win](#second-order-win-the-claim-becomes-falsifiable)).
+
+## Naming: the axis, then the word
+
+v1 called the label `audience` and left the word as open question #1. The review
+resolved it, and the resolution is about the **axis**, not the spelling:
+
+- **A label must be true at every mount of the type.** The production consumer
+  mounts one controller type at two prefixes belonging to **different client
+  classes** — same code, different base path, different transport. No client-class
+  value (*"the CLI"*, *"the app"*) is true at both mounts. What *is* true at both
+  is what the caller must **present**: a credential. So the value vocabulary that
+  works is a **credential posture** — `"credential"`, `"anonymous"`,
+  `"signature"`, … — not a client identity.
+- **`audience` already means the client class** in the consumer's own design
+  vocabulary — it is the *family's* property, the thing the top-level prefix
+  names. Borrowing it for the controller's property would put the two meanings one
+  attribute apart.
+- Two outside readings point the wrong way too: in JWT, `aud` names the token's
+  **recipient**; in common doc conventions, an *audience* line names a document's
+  **readers**. Both make "audience" the receiving end, and this label describes the
+  calling end.
+
+**Decision: the attribute is `expects`.** `#[controller(expects = "credential")]`
+— *this controller expects a credential of its callers*; `expects = "anonymous"`,
+`expects = "signature"` read the same way. The trait method is `actus_expects()`,
+matching the attribute the way `rate_limit` → `actus_rate_limit` does. The value
+stays an opaque `&'static str` the framework compares for presence and passes
+through, never interprets. (`caller = …` was the runner-up; `access` remains
+rejected — it is the removed enum's word and would read as a revived authorization
+feature; `audience` is retired for the reasons above.)
+
+The word **family** keeps naming the prefix and its client class — that is what
+`families { "api", … }` declares in Phase 2.
 
 ## Constraints from the design
 
@@ -107,9 +176,9 @@ Anything shipped here has to survive the principles in `CLAUDE.md`:
 - **Principle 5 (two macros, one audit surface).** The family declaration belongs
   in `app_routes!`, next to the mounts it constrains — not in a builder call, not
   in a config file, not in an attribute on some third item.
-- **Principle 3 (explicit over magic).** A controller's audience is written on the
-  controller. It is never inferred from the mount, from the presence of a `prepare`
-  hook, or from anything else the framework could cleverly deduce.
+- **Principle 3 (explicit over magic).** A controller's expectation is written on
+  the controller. It is never inferred from the mount, from the presence of a
+  `prepare` hook, or from anything else the framework could cleverly deduce.
 
 ### The precedent, and its blind spot
 
@@ -126,53 +195,56 @@ That is the shape to follow. But it has a blind spot that matters here:
 blind to an **omission**.
 
 For rate limiting that is a tolerable asymmetry. For route families, **omission is
-the entire failure mode**. Any inventory added here must emit a row for every
-mounted controller, including the ones that declared nothing. See
-[Open questions](#open-questions-for-the-review) #4 on whether to fix the
-rate-limit method to match.
+the entire failure mode**. The inventory added here emits a row for every mounted
+controller, including the ones that declared nothing — and
+`rate_limit_classes()` keeps its shape (changing it is breaking) with its
+asymmetry **documented**, pointing at the new inventory for the
+absence-inclusive view. *(That resolves v1's open question #4.)*
 
 ## Shapes considered
 
-### Shape A — expose the `prepare` hook, change nothing else
+### Shape A — surface the `prepare` hook
 
 The `#[controller(prepare = Self::auth)]` attribute is parsed by the macro and
 compiled directly into `actus_dispatch`. It is never surfaced: the `Controller`
 trait exposes `actus_describe_routes`, `actus_max_body_bytes`, `actus_rate_limit`
-and `__name`, and nothing about `prepare`. Add `actus_prepare() -> Option<&'static str>`
-returning the hook's path as a string, and an application can audit "every
-controller under `api/` has a hook."
+and `__name`, and nothing about `prepare`. Add
+`actus_prepare() -> Option<&'static str>` (the hook's path, stringified; **presence
+is the payload**, the string is a courtesy for route dumps).
 
-**Cheapest possible change, and genuinely worth doing for its own sake** — a route
-dump that omits the hook name is hiding a fact the framework has. But it does not
-solve the problem: as established above, a `prepare` hook's presence says nothing
-about what it enforces. Auditing for it would produce a green check over an
-unenforced family, which is worse than no check.
+v1 called this "worth doing for its own sake" but "not the answer," since a hook's
+presence says nothing about what it enforces. The review **promoted it to a Phase 1
+requirement**: it is one half of the boot rule that closes the enforcement loop —
+*"a controller whose floor is `credential` must have a hook to refuse anonymous
+callers with."* See
+[Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path).
 
-*Verdict: do it, for auditability. Do not call it the answer.*
+*Verdict: **in Phase 1, load-bearing.***
 
-### Shape B — an audience label plus an absence-inclusive inventory
+### Shape B — an expectation label plus an absence-inclusive inventory
 
-`#[controller(audience = "…")]` records an opaque label; `Router::audiences()`
-returns one row **per mounted controller**, carrying `Option<&'static str>`. The
-application writes the family rule itself, in `main()`, and fails boot on a
-violation.
+`#[controller(expects = "…")]` records an opaque label; the router exposes one row
+**per mounted controller**, carrying `Option<&'static str>`. The application writes
+the family rule itself, in `main()`, and fails boot on a violation.
 
 Follows the rate-limit precedent exactly, fixes its blind spot, adds no new
 grammar, and leaves every judgement with the application.
 
-*Verdict: **recommended, as Phase 1.***
+*Verdict: **recommended, as Phase 1** — with the inventory shaped as the one
+record it should always have been; see [Recommended shape](#recommended-shape).*
 
 ### Shape C — a compile-time family contract in `app_routes!`
 
 A `families` block names the prefixes that require a declaration; the macro emits a
-trait-bound assertion per mount under one. A controller with no `audience` mounted
-under a listed prefix **fails to compile**.
+trait-bound assertion per mount under one. A controller with no `expects` label
+mounted under a listed prefix **fails to compile**.
 
 Catches the failure at the moment the developer adds the mount, in their editor,
 rather than at the next boot. Zero runtime cost. Costs new macro grammar and one
 public marker trait.
 
-*Verdict: **recommended, as Phase 2.***
+*Verdict: **recommended, as Phase 2** — deferred until Phase 1 has a release cycle
+of real use behind it; see [Why now](#why-now-why-not-later).*
 
 ### Shape D — the framework owns the family policy
 
@@ -187,9 +259,9 @@ Principle 7 exists to refuse.
 ### Shape E — a prefix middleware, no framework change at all
 
 The obvious objection, and the strongest one: an application can write a
-`Middleware` today that inspects `request.path`, and rejects anything under `api/`
-without a valid session. That is *real enforcement*, not merely a declaration, and
-it needs nothing from Actus.
+`Middleware` today that inspects the request path, and rejects anything under
+`api/` without a valid session. That is *real enforcement*, not merely a
+declaration, and it needs nothing from Actus.
 
 **It is complementary, and most applications should have one.** It is not a
 substitute, for three reasons:
@@ -199,7 +271,11 @@ substitute, for three reasons:
    unauthenticated discovery route on a client lane. Encoding those in a middleware
    means a path allow-list: a second out-of-band list, maintained by hand, drifting
    from the routes exactly the way the prose invariant does today. The failure mode
-   is preserved and relocated.
+   is preserved and relocated. *(Not hypothetical: the production consumer already
+   carries one path-keyed middleware exemption, and when the route under it was
+   renamed, only a deliberately-planted comment kept the carve-out from silently
+   ceasing to carve — a path comparison over segments contains no literal a
+   search-and-replace can find.)*
 2. **It enforces a floor, not the policy.** The real decisions are resource-aware
    ("may *this* caller modify *this* record") and stay in handlers. A middleware
    that tried to subsume them would duplicate the policy layer.
@@ -208,11 +284,8 @@ substitute, for three reasons:
    the family default and invisible when it did not — and *"invisible when it did
    not"* is the case that shipped wrong.
 
-The mechanism below ties the declaration to the controller, in the file the author
-already has open, and puts the carve-outs in one reviewable `match`.
-
 ⭐ **The sharper way to say it: the middleware is the right mechanism with the wrong
-key.** A gate keyed on `request.path` protects a *location*; a gate keyed on the
+key.** A gate keyed on the request path protects a *location*; a gate keyed on the
 controller's declaration protects a *claim*, needs no allow-list, and covers a
 controller mounted anywhere — including somewhere nobody anticipated. Keep the
 middleware; change what it reads. See
@@ -220,33 +293,48 @@ middleware; change what it reads. See
 
 ## Recommended shape
 
-**Phase 1 — the label and the inventory.**
+**Phase 1 — the label, the inventory, and the accessor.**
 
 ```rust
-// The controller states what it expects of callers. An opaque label; Actus
-// compares it for presence and hands it back untouched.
-#[controller(audience = "session", prepare = Self::auth)]
+// The controller states the least-privileged caller it accepts. An opaque
+// label; Actus compares it for presence and hands it back untouched.
+#[controller(expects = "credential", prepare = Self::auth)]
 impl ThingController {
     routes! { GET "" => list() }
 }
 ```
 
 ```rust
-// actus-controller — a new trait method, defaulted, so every existing
-// controller keeps compiling.
-fn actus_audience(&self) -> Option<&'static str> { None }
+// actus-controller — two new trait methods, both defaulted, so every
+// existing controller keeps compiling.
+fn actus_expects(&self) -> Option<&'static str> { None }
+fn actus_prepare(&self) -> Option<&'static str> { None }   // Shape A
 ```
 
 ```rust
 // actus-server — one row per MOUNTED CONTROLLER, not per declaration.
-pub struct MountAudience {
-    pub mount: String,                    // "api/things"; "" for a root mount
-    pub controller: &'static str,         // Controller::__name()
-    pub audience: Option<&'static str>,   // None = declared nothing
+// Framework-populated: consumers read it, they never construct it — so it
+// is #[non_exhaustive] from day one, and fields can be added in minors.
+#[non_exhaustive]
+pub struct Mount {
+    pub mount: String,                          // "api/things"; "" for a root mount
+    pub controller: &'static str,               // Controller::__name()
+    pub expects: Option<&'static str>,          // None = declared nothing
+    pub prepare: Option<&'static str>,          // None = no prepare hook
+    pub rate_limit_class: Option<&'static str>,
+    pub max_body_bytes: Option<usize>,
 }
 
 impl Router {
-    pub fn audiences(&self) -> Vec<MountAudience>;
+    /// One row per mounted controller — the inventory. Deterministic DFS,
+    /// like `routes()`. Absence is a row, never a skip.
+    pub fn mounts(&self) -> Vec<Mount>;
+}
+
+impl Server {
+    /// The router this server serves. Lets application middleware use the
+    /// framework's own matcher instead of re-deriving the route tree.
+    pub fn router(&self) -> Arc<Router>;
 }
 ```
 
@@ -254,24 +342,47 @@ impl Router {
 `rate_limit_classes()`, and it is the entire point: the omission has to be
 representable before it can be caught.
 
-The application owns the rule, and writes it once:
+⭐ **`Mount` is the inventory `Router` should always have had.** v1 sketched a
+three-field `audiences()` record and asked (open question #3) whether a future
+`inventory()` should consolidate the walks. The review's answer: ship the
+consolidated record *now*, `#[non_exhaustive]` so it can grow, and keep
+`routes()` / `rate_limit_classes()` as documented projections. One walk, one
+record, no third method with a third emptiness semantics — and no repeat of the
+freeze the [`2.0` docket](../2.0-docket.md) documents. *(A v1 draft of this very
+struct was all-`pub` with no `#[non_exhaustive]` — the exact mistake the docket
+records, made while citing it. The general rule now lives in `CLAUDE.md`: every
+new public type ships `#[non_exhaustive]` unless consumers must construct it.)*
+
+The application owns the rule, and writes it once. Family membership is tested
+**first**, so mounts outside every family — a health probe, a root catch-all —
+are unconstrained, as the text has always promised:
 
 ```rust
-fn audience_coverage(router: &Router) -> Result<(), String> {
+fn family_coverage(router: &Router) -> Result<(), String> {
+    // family prefix → the floors it accepts
+    let accepted: &[(&str, &[&str])] = &[
+        ("public", &["anonymous"]),
+        ("api",    &["credential", "anonymous"]), // "anonymous": the login carve-outs, deliberate
+        ("admin",  &["credential"]),
+        ("hooks",  &["signature"]),
+    ];
     let mut bad = Vec::new();
-    for row in router.audiences() {
-        let family = row.mount.split('/').next().unwrap_or("");
-        match (family, row.audience) {
-            ("public", Some("anonymous")) => {}
-            ("api",    Some("session"))   => {}
-            ("api",    Some("anonymous")) => {}   // the login routes — deliberate
-            ("admin",  Some("session"))   => {}
-            ("hooks",  Some("signature")) => {}
-            (_, None) => bad.push(format!(
-                "  - {} at `{}` declares no audience", row.controller, row.mount)),
-            (f, Some(a)) => bad.push(format!(
+    for m in router.mounts() {
+        let family = m.mount.split('/').next().unwrap_or("");
+        // Not under a declared family → unconstrained ("health", the "*" shell, …).
+        let Some((_, floors)) = accepted.iter().find(|(f, _)| *f == family) else { continue };
+        match m.expects {
+            None => bad.push(format!(
+                "  - {} at `{}` declares no caller expectation", m.controller, m.mount)),
+            Some(e) if !floors.contains(&e) => bad.push(format!(
                 "  - {} at `{}` declares {:?}, which family `{}` does not accept",
-                row.controller, row.mount, a, f)),
+                m.controller, m.mount, e, family)),
+            // The boot half of the enforcement loop: a credential floor needs
+            // a hook to refuse anonymous callers with (see § Enforcement).
+            Some("credential") if m.prepare.is_none() => bad.push(format!(
+                "  - {} at `{}` expects a credential but has no `prepare` hook",
+                m.controller, m.mount)),
+            _ => {}
         }
     }
     if bad.is_empty() { Ok(()) } else { Err(bad.join("\n")) }
@@ -279,10 +390,10 @@ fn audience_coverage(router: &Router) -> Result<(), String> {
 ```
 
 Every carve-out is now **a line of code somebody had to write**, in one file, in a
-`match` a reviewer reads top to bottom. That is the artifact that does not exist
+table a reviewer reads top to bottom. That is the artifact that does not exist
 today in any form.
 
-**Phase 2 — the same check, moved to compile time.**
+**Phase 2 — the presence half of the check, moved to compile time.**
 
 ```rust
 app_routes! {
@@ -300,37 +411,42 @@ For each route whose mount is under a listed prefix, the macro wraps the
 construction in a pass-through assertion:
 
 ```rust
-.add_route("api/things", Arc::new(::actus::__internal::declares_audience(ThingController { db })))
+.add_route("api/things", Arc::new(::actus::__internal::declares_expectation(ThingController { db })))
 ```
 
 ```rust
 // actus-controller
-pub fn declares_audience<T: Controller + DeclaresAudience>(c: T) -> T { c }
+pub fn declares_expectation<T: Controller + DeclaresExpectation>(c: T) -> T { c }
 
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is mounted under a route family that requires a declared audience",
-    label = "this controller declares no audience",
-    note = "add `audience = \"…\"` to its `#[controller(...)]` attribute, or drop the \
+    message = "`{Self}` is mounted under a route family that requires a declared caller expectation",
+    label = "this controller declares no `expects` label",
+    note = "add `expects = \"…\"` to its `#[controller(...)]` attribute, or drop the \
             prefix from the `families` block in `app_routes!`"
 )]
-pub trait DeclaresAudience {}
+pub trait DeclaresExpectation {}
 ```
 
-`#[controller(audience = "…")]` emits `impl DeclaresAudience for ThingController {}`.
-A controller with no audience, mounted under a declared family, is a compile error.
+`#[controller(expects = "…")]` emits `impl DeclaresExpectation for ThingController {}`.
+A controller with no label, mounted under a declared family, is a compile error.
 
 **Verified, not assumed** — compile-probed against the 1.88 MSRV toolchain on
-2026-08-30 (`rustc +1.88 --edition 2024`), which is what the mechanism produces:
+2026-08-30 (`rustc +1.88 --edition 2024`). This paste is the *complete* output the
+mechanism produces (a v1 paste omitted the two extra `help:` lines the compiler
+adds):
 
 ```text
-error[E0277]: `SpaController` is mounted under a route family that requires a declared audience
+error[E0277]: `SpaController` is mounted under a route family that requires a declared caller expectation
    |
-24 |     let _ = declares_audience(SpaController);
-   |             ----------------- ^^^^^^^^^^^^^ this controller declares no audience
+19 |     let _ = declares_expectation(SpaController);
+   |             -------------------- ^^^^^^^^^^^^^ this controller declares no `expects` label
    |             |
    |             required by a bound introduced by this call
    |
-   = note: add `audience = "…"` to its `#[controller(...)]` attribute
+   = help: the trait `DeclaresExpectation` is not implemented for `SpaController`
+   = note: add `expects = "…"` to its `#[controller(...)]` attribute, or drop the prefix from the `families` block in `app_routes!`
+   = help: the trait `DeclaresExpectation` is implemented for `ThingController`
+note: required by a bound in `declares_expectation`
 ```
 
 Both halves hold at MSRV: `#[diagnostic::on_unimplemented]` is accepted (stabilized
@@ -340,7 +456,9 @@ unsatisfied-trait-bound.
 
 Wrapping the **expression** rather than naming the type is what makes this work for
 any construction form — `Foo { db }`, `Foo::new(db)`, `make_foo()` — with no type
-extraction in the macro and no runtime cost.
+extraction in the macro and no runtime cost. And the bound always applies:
+`add_route` takes `Arc<dyn Controller>` and the macro emits `Arc::new(expr)`, so
+every construction is a concrete `T: Controller`.
 
 ### Which phase does what
 
@@ -348,9 +466,10 @@ extraction in the macro and no runtime cost.
 |---|---|---|
 | catches a **missing** declaration | at boot | **at compile time** |
 | catches a **wrong** declaration | at boot | at boot (unchanged) |
-| new public API | 1 trait method, 1 struct, 1 `Router` method, 1 attribute key | + 1 marker trait, + 1 `app_routes!` block |
-| the check can be skipped by | not calling it | nothing |
-| enables a **runtime** gate | yes — via a boot-built map (see below) | unchanged |
+| catches a credential floor with **no hook** | at boot | at boot (unchanged) |
+| new public API | 2 trait methods, 1 struct, 1 `Router` method, 1 `Server` method, 1 attribute key | + 1 marker trait, + 1 `app_routes!` block |
+| the check can be skipped by | not calling it | nothing (presence); not calling it (value) |
+| enables a **per-request** gate | yes — via `Server::router()` or the hook (see below) | unchanged |
 
 Phase 2 does not replace Phase 1's startup check — it only guarantees *presence*.
 Whether the declared value is the right one for the family stays a string
@@ -359,132 +478,162 @@ comparison, and that stays at boot.
 ## Enforcement: key the gate to the declaration, not the path
 
 A declaration is worth more than an audit if something can *act* on it per request.
-This section is what a real design question produced, and the answer generalises past
-the case that raised it.
 
-**The question.** An application with client-segregated top-level prefixes hits an
-awkwardness: a family reserved for authenticated callers must still expose the routes
-that *establish* authentication — login, registration, credential reset, an OAuth
-callback. So the family has a hole in it, and the invariant "everything under this
-prefix is authenticated" is false by design. The tempting fix is to **hoist**: move
-those routes to a top-level `auth/` family, leaving the original prefix uniform and
-gateable by a blanket path rule.
+**The question that raised this.** A family reserved for authenticated callers must
+still expose the routes that *establish* authentication — login, registration, an
+OAuth callback — so the family has deliberate holes, and the tempting fix is to
+**hoist** those routes into their own top-level family. Hoisting is the wrong
+lever: it re-parents endpoints without merging them, it creates a top-level lane
+with *no* invariant at all (an auth surface is irreducibly mixed — see
+[The mixed controller](#the-mixed-controller-the-label-is-the-floor)), and it
+spends the top-level path segment — the one thing every prefix-scoped intermediary
+keys on — to buy a property a label provides for free. **The general rule: the
+top-level segment is already spent. Anything else you want to segregate belongs at
+controller granularity, where a declaration is cheap and the framework can check
+it.** *(The long-form version of this argument lives with the production consumer's
+design records, where the concrete case was decided; the rule above is the part
+that generalises.)*
 
-**Hoisting is the wrong lever, and the reason is worth stating in general terms:** it
-restructures the URL space to buy a property that a declaration buys for free. Three
-costs, none of which the hoist can avoid:
+### The gate, additively — v1 was wrong here
 
-1. **It merges nothing.** The per-client login endpoints stay distinct after the move
-   (they have different transports — one sets a cookie, one is bearer-native). The
-   endpoint set is unchanged; only the segment order is. The whole cost buys a
-   re-parenting.
-2. **The hoisted surface is not uniform either.** An auth surface is *irreducibly*
-   mixed: `login` and `reset` are anonymous, but `logout`, `me`, and step-up
-   re-authentication all require an existing session. Hoisting therefore creates a
-   top-level family with **no invariant at all**, containing some of the most
-   sensitive authenticated routes in the system, under a prefix every reader parses
-   as "the anonymous lane." That inverts the problem rather than solving it.
-3. **It spends the wrong segment.** The first path segment is the one every
-   intermediary keys on — an edge rewrite, CORS, any prefix-scoped policy. If the
-   model's premise is that the top level names the audience, a hoist demotes the
-   audience to second place in favour of a function name the rest of the path already
-   carries, and gives each client two base URLs where it had one.
+v1 concluded that a per-request gate needed the framework to stamp the label onto
+`Request`, that the stamp was a `2.0` change (true — see below), and that until
+then an application had to re-implement longest-prefix matching over a boot-built
+map, where "a subtly different match is a subtly different security boundary."
+**The review overturned the conclusion.** Three facts, all checkable:
 
-⭐ **The general rule: the top-level segment is already spent. Anything else you want
-to segregate belongs at controller granularity, where a declaration is cheap and the
-framework can check it.** Restructuring URLs to obtain a checkable invariant is paying
-in architecture for something a label provides.
-
-### What the gate then looks like
-
-Once the audience is declared, an application `Middleware` can enforce a floor with
-**no allow-list at all**:
+1. **`Router::match_controller` is public** (`crates/actus-server/src/router.rs`).
+   The exact matcher the server uses is callable by anyone holding the router.
+   Nothing needs re-implementing, so the "subtly different boundary" hazard does
+   not exist.
+2. **`RouteMatch.controller: Arc<dyn Controller>` exposes every trait method** —
+   the label, the rate-limit class, the name. Everything a stamp would carry is one
+   tree walk away.
+3. The only missing piece is that **nothing can hold the router**: `Router` is not
+   `Clone`, `Server::new` moves it into a private `Arc`, and there is no accessor.
+   **`Server::router()` — one additive method — closes the gap.**
 
 ```rust
-// The gate reads a CLAIM, not a location.
-if request_audience == Some("session") && !has_valid_session(&request) {
-    return Err(WebError::Unauthorized);
+let server = Server::new(router);
+let router = server.router();                        // Arc<Router>
+let server = server.with_middleware(Gate { router });
+```
+
+```rust
+async fn before(&self, req: &mut Request) -> Result<Outcome, WebError> {
+    let Some(rm) = self.router.match_controller(&req.path_parts) else {
+        return Ok(Outcome::Continue);               // no route → the 404 path handles it
+    };
+    if rm.controller.actus_expects() == Some("credential") && !carries_credential(req) {
+        return Err(WebError::Unauthorized);
+    }
+    Ok(Outcome::Continue)
 }
 ```
 
-Be fair to the alternative: a prefix gate *does* cover its own subtree
-automatically, new mounts included, and that is its real strength. Two things it
-cannot do. It cannot express an **exception** without enumerating it by path — a
-second list, maintained beside the routes, drifting from them. And it cannot follow a
-controller mounted **outside** the prefix anyone thought to cover. The
-declaration-keyed gate has neither limitation, because the claim travels with the
-controller rather than with its address: the exception is the controller declaring
-`"anonymous"` in its own file, and a controller carrying `"session"` is gated at every
-mount it ever appears at.
+No allow-list, no hand-rolled matcher, no `2.0`. The cost is a second tree walk
+per request — a `HashMap` hop per path segment. The `Request` stamp is therefore an
+**optimisation** (one walk instead of two, plus discoverability beside
+`rate_limit_class`), and it is queued on the [`2.0` docket](../2.0-docket.md) as
+exactly that. The finding generalises: any per-request "stamp X onto `Request`"
+whose X is a `Controller` trait method is reachable the same way, because the
+stamp field on `Request` is a breaking change for all of them —
+`Request` is all-`pub` with no `#[non_exhaustive]` and no private field, so a new
+field breaks downstream struct literals (verified 2026-08-30; the full
+extensibility finding is the docket's § 1).
 
-### Reading the declaration: today, and the way it should work
+### Where the gate belongs when the hook resolves credentials
 
-**Today, additively (Phase 1, no framework change beyond the label).** Build the map
-once at boot from the inventory, and look up in the middleware:
+There is a subtlety the middleware form runs into, and a consumer shaped like ours
+will hit it: **"is a credential present *and valid*?" is answered by the shared
+`prepare` hook**, with store access — and the hook runs *after* the middleware
+chain. `Params::insert`, the per-request state channel, exists only from `prepare`
+onward; a `before` middleware sees `&mut Request` and nothing downstream of it. So
+a middleware gate must either check mere **presence** (cheap, storeless — and it
+already catches the motivating incident, where the caller presented nothing at
+all) or resolve the credential a **second** time.
 
-```rust
-// at startup, from the declarations themselves — not hand-maintained
-let gate: HashMap<String, &'static str> = router.audiences()
-    .into_iter()
-    .filter_map(|r| r.audience.map(|a| (r.mount, a)))
-    .collect();
-```
+**The prepare hook is the better enforcement point for that consumer — and it
+already holds everything it needs.** The hook is a method on the controller, so
+`self.actus_expects()` is readable from inside it. The one shared hook body
+becomes declaration-aware — *if my floor is `"credential"` and no credential
+resolved, refuse* — and every controller that delegates to it enforces its own
+label, with the credential resolved once and stashed once. No middleware, no
+double lookup, no framework change beyond Phase 1.
 
-This keeps the property that matters — **the gate is derived from declarations, never
-from a hand-written path list** — at the cost of the application re-implementing
-longest-prefix matching over `request.path_parts`, which the router already does
-correctly. That duplication is a real wart: mounts nest, and a subtly different match
-is a subtly different security boundary.
+The hole in that design is a labelled controller **with no hook** — which is
+precisely what Shape A closes: `Mount.prepare` puts hook presence in the
+inventory, and the boot rule in the sketch above requires *floor = credential ⇒
+hook present*. The loop is then closed end to end:
 
-**The right shape: the framework stamps it.** Actus already does exactly this for the
-sibling label — `server.rs` sets `request.rate_limit_class` from the matched
-controller right after routing and before the `before` chain. An `audience` field
-alongside it would remove the duplicated matching entirely and cost one line at the
-stamp site.
+| the guarantee | checked by | when |
+|---|---|---|
+| every family member declares a floor | `family_coverage` (Phase 1) or the `families` block (Phase 2) | boot / compile |
+| a credential floor has a hook to enforce it | `family_coverage`, via `Mount.prepare` | boot |
+| the hook refuses callers below the floor | the shared hook, reading `self.actus_expects()` | per request |
+| the floor is *true*, not merely declared | the probe test | CI |
 
-### ⛔ Why the stamp is queued and not in Phase 1
+Both gate forms stay application code, and what "a credential" means stays
+entirely the application's — the framework supplied a label, an inventory, and an
+accessor.
 
-**Adding that field is a breaking change**, verified against the code on 2026-08-30:
+## The mixed controller: the label is the floor
 
-- `Request` carries six fields, **every one `pub`**, with **no private field** and
-  **no `#[non_exhaustive]`** (`crates/actus-server/src/request.rs`).
-- Downstream code can therefore construct it with an exhaustive struct literal — and
-  *does*: Actus's own tests build one that way (`request.rs`, the `req(...)` helper),
-  which is the natural shape for a middleware unit test in any consumer.
-- Adding a public field to a struct with no private fields and no `#[non_exhaustive]`
-  is a **major** change under Cargo's SemVer rules. Marking it `#[non_exhaustive]`
-  now is equally breaking, for the same reason.
+*(Resolves v1's open question #7 — "is 'split it' a good enough answer?" It is
+not, and the floor semantics above are the answer.)*
 
-⭐ **The finding is larger than this proposal, and is now recorded on its own** in
-[`../2.0-docket.md`](../2.0-docket.md) — it turned out to apply to every public type,
-not just `Request`:
-`Request` cannot receive *any* new routing-derived projection during `1.x`.
-`rate_limit_class` got in before the freeze; nothing can follow it. Every future
-"stamp the matched route's X onto the request" idea is now a `2.0` item. The 1.0
-freeze audit did not surface this, because it reviewed the *shape* of the public
-surface rather than its *extensibility*.
+The archetype is an auth controller, and the production consumer has exactly one:
+`login`, `register`, verification and reset flows are anonymous — they *establish*
+the session — while `logout`, `me` and step-up re-authentication require one. No
+single "what this controller requires" value is honest for the whole type. v1's
+answer was to split it into an anonymous controller and an authenticated sibling.
+For a shipped application that answer is expensive in a way v1 did not price:
 
-⇒ **Recommendation: ship Phase 1 without the stamp, and put `#[non_exhaustive]` on
-`Request` plus the `audience` field on the [`2.0` docket](../2.0-docket.md) as one
-item.** The boot-built
-map above is a working gate in the meantime, and the day a `2.0` happens the wart
-disappears without the application changing its middleware's logic — only where it
-reads the label from.
+- moving the session-required routes to a new mount **changes wire URLs** that
+  deployed clients already call; or
+- keeping the URLs means **one mount per route**, because longest-prefix routing
+  makes each hoisted route its own mount.
+
+**The floor dissolves the dilemma.** The mixed controller declares its weakest
+route's floor — `expects = "anonymous"`, honestly: it accepts anonymous callers —
+and its stricter routes keep enforcing in their handlers, exactly as they do
+today. The family rule accepts `("api", "anonymous")` as the deliberate,
+reviewable carve-out. What remains outside the machine-checked floor is then
+**small and enumerable**: the `"anonymous"`-labelled controllers inside
+credentialed families — a handful in the production consumer — and a reviewer
+reads those few by hand. That is the "line of code somebody had to write."
+
+Splitting stays the *better* shape where it is free — two controllers each
+carrying a strong claim beat one carrying a weak one — and the README should say
+both halves: recommend the split for new surfaces, state the floor semantics for
+shipped ones. A per-route label stays out of scope; it would be additive later if
+a real consumer outgrows the floor.
 
 ## Second-order win: the claim becomes falsifiable
 
 This is the part worth more than the check itself.
 
 Once every controller in a family carries a label, the application can write **one**
-test that walks `Router::audiences()`, fires an unauthenticated request at each
-mount, and asserts the response agrees with the declared label — a controller
-claiming `"session"` must not answer `200`; one claiming `"anonymous"` must not
+test that walks the inventory, fires an unauthenticated request at each mounted
+route, and asserts the response agrees with the declared floor — a controller
+claiming `"credential"` must not answer `200`; one claiming `"anonymous"` must not
 answer `401`.
 
 Actus still verifies nothing about authentication. But it is the only thing that can
 **enumerate every route**, and enumeration is what turns a claim from documentation
 into something a test can refute. A route added tomorrow is in the inventory the
 moment it is mounted, so it is in that test too, with nobody remembering to add it.
+
+Two preconditions the test must honor, or it lies:
+
+- **Pair every probe with an authenticated control.** A handler that looks the
+  resource up before checking the caller answers `404` to a synthetic id — and
+  "not `200`" passes for a *dead* route just as it does for a guarded one. The
+  control request must get its `200`, so a broken route cannot masquerade as a
+  working guard. *(The production consumer's fix for the motivating incident
+  already carries exactly this control; generalise it.)*
+- **Walk `routes()`, not just mounts.** A mount root is often a `404`/`405`, which
+  proves nothing; patterns with `{id}` parameters need synthetic values.
 
 That is the honest division of labour: **the framework supplies the enumeration and
 insists on the claim; the application supplies the probe that checks it.**
@@ -493,65 +642,75 @@ insists on the claim; the application supplies the probe that checks it.**
 
 ### `actus-controller`
 
-- `Controller::actus_audience(&self) -> Option<&'static str>`, defaulted to `None`.
-- `pub trait DeclaresAudience {}` with the `on_unimplemented` diagnostic (Phase 2).
-- `pub fn declares_audience<T: Controller + DeclaresAudience>(c: T) -> T` (Phase 2),
-  re-exported through `actus::__internal`.
-- Shape A, if taken: `Controller::actus_prepare(&self) -> Option<&'static str>`.
+- `Controller::actus_expects(&self) -> Option<&'static str>`, defaulted to `None`.
+- `Controller::actus_prepare(&self) -> Option<&'static str>`, defaulted to `None`.
+- `pub trait DeclaresExpectation {}` with the `on_unimplemented` diagnostic (Phase 2).
+- `pub fn declares_expectation<T: Controller + DeclaresExpectation>(c: T) -> T`
+  (Phase 2), re-exported through `actus::__internal`.
 
 ### `actus-controller-macros`
 
-- `#[controller]` parses `audience = "…"` alongside `strict` / `lax` / `prepare` /
-  `max_body_bytes` / `rate_limit`; emits `actus_audience` and (Phase 2)
-  `impl DeclaresAudience`.
+- `#[controller]` parses `expects = "…"` alongside `strict` / `lax` / `prepare` /
+  `max_body_bytes` / `rate_limit`; emits `actus_expects`, emits `actus_prepare`
+  (the stringified hook path) when `prepare` is set, and (Phase 2)
+  `impl DeclaresExpectation`.
 - `app_routes!` parses an optional `families { "a", "b" }` block. `AppRoutesInput`
   grows one field; `generate_app_routes` wraps constructions whose mount is under a
   listed prefix. **Segment-wise prefix match** — `"api"` covers `"api/auth/oauth"`
-  but not `"apiary"`.
-- A `families` entry matching no mount should be a compile **warning** (or error —
-  open question #5): it is usually a typo, and a typo'd family silently constrains
-  nothing.
+  but not `"apiary"` — and it strips the trailing-`*` sugar the way `add_route`
+  does, so `"api/*"` and `"api"` constrain identically.
+- A `families` entry matching no mount is a compile **error**. *(v1 asked
+  warn-or-error; there is no "warn": stable proc macros cannot emit warnings —
+  `proc_macro::Diagnostic` is unstable — only errors or a deprecated-item hack.
+  Error is also the symmetric choice: a typo'd family silently constraining
+  nothing is the same failure this feature exists to prevent, one level up. The
+  legitimate "family declared before its first controller" case costs one line
+  when that controller lands.)*
 
 ### `actus-server`
 
-- `pub struct MountAudience`; `Router::audiences()` walking the tree the way
+- `#[non_exhaustive] pub struct Mount`; `Router::mounts()` walking the tree the way
   `routes()` does (children sorted, deterministic DFS), emitting a row for **every**
   node bearing a controller.
-- **Queued for `2.0`, not Phase 1** (§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)):
-  `#[non_exhaustive]` on `Request`, plus
-  `pub audience: Option<&'static str>` set from `route_match.controller.actus_audience()`
-  at the same site that already sets `rate_limit_class`. One line at the stamp site;
-  the cost is entirely in the major version it forces.
+- `Server::router(&self) -> Arc<Router>` — clone of the server's `Arc`.
+- `rate_limit_classes()` keeps its shape; its rustdoc gains the asymmetry note and
+  a pointer to `mounts()`.
+- **Queued for `2.0` as an optimisation** (see
+  [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)):
+  `#[non_exhaustive]` on `Request` plus `pub expects: Option<&'static str>` set at
+  the same site that already sets `rate_limit_class`.
 
 ### Tests
 
-- Macro: `audience` parses; combines with every other attribute key; emits the trait
-  impl (Phase 2).
-- Router: `audiences()` emits a row for an undeclared controller — *the regression
+- Macro: `expects` parses; combines with every other attribute key; emits the
+  trait impl (Phase 2); `actus_prepare` reflects the attribute.
+- Router: `mounts()` emits a row for an undeclared controller — *the regression
   test for the blind spot this design exists to fix*; deterministic ordering; `""`
-  for a root mount.
+  for a root mount; the full record round-trips the other declarations.
+- `Server::router()` returns a router that matches what the server serves.
 - `app_routes!`: nested prefixes are covered; `"apiary"` is not covered by `"api"`;
-  an unlisted mount is unconstrained.
-- Compile-fail (Phase 2): a `trybuild` case asserting the missing-audience error, and
+  `"api/*"` behaves as `"api"`; an unlisted mount is unconstrained.
+- Compile-fail (Phase 2): a `trybuild` case asserting the missing-label error and
   that its message is the `on_unimplemented` one. This is the first `trybuild`
   dependency in the workspace — see effort, below.
-- `examples/advanced` grows an `audience_coverage` check next to `rate_limit_coverage`,
-  wired into its existing `--check` flag, with unit tests for a violation and a pass —
-  mirroring the two `rate_limit_coverage` tests already there.
-- `examples/advanced` also grows the **gate** from
-  [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path) as a
-  `Middleware` beside its rate limiter: the boot-built `mount → audience` map, a
-  longest-prefix lookup, `WebError::Unauthorized` on a `"session"` mount with no
-  credential. Without it the proposal ships a *declaration* with no worked example of
-  anything acting on one, which is how a feature gets read as documentation-only. An
-  integration test drives a real request at an `"anonymous"` mount and a `"session"`
-  mount and asserts the two outcomes.
+- `examples/advanced` grows `family_coverage` next to `rate_limit_coverage`,
+  wired into its existing `--check` flag, with unit tests for a missing label, a
+  wrong label, a credential floor with no hook, and a pass.
+- `examples/advanced` also grows the **gate** as a `Middleware` beside its rate
+  limiter — `Server::router()` + `match_controller` + `actus_expects`, refusing a
+  `"credential"` mount with no credential header. Without it the proposal ships a
+  *declaration* with no worked example of anything acting on one, which is how a
+  feature gets read as documentation-only. An integration test drives a real
+  request at an `"anonymous"` mount and a `"credential"` mount and asserts the two
+  outcomes. *(A consumer whose hook resolves credentials can enforce in the hook
+  instead — the example's README note says so and points here.)*
 
 ### Docs
 
 - README: a "Route families" section after "Middleware", framed as *coverage, not
-  authorization*, with the limit stated in the first paragraph.
-- The `actus_audience` rustdoc carries the same "label, not a policy" paragraph
+  authorization*, opening with the floor definition, and stating both answers for
+  the mixed controller (split when free; floor when shipped).
+- The `actus_expects` rustdoc carries the same "label, not a policy" paragraph
   `actus_rate_limit` does — that doc comment is the load-bearing one, because it is
   where a reader decides whether this is an auth feature. It is not.
 - CHANGELOG under Added, per phase.
@@ -563,180 +722,164 @@ insists on the claim; the application supplies the probe that checks it.**
   return.
 - **Replace the policy layer.** Resource-aware decisions stay in handlers, where the
   resource is.
-- **Per-route audiences.** The label is per-controller, matching `max_body_bytes`
-  and `rate_limit`. A route needing a different audience gets its own controller —
-  the same answer the body-cap proposal gives, and for the same reason. A per-route
-  override would be additive later, if a real consumer hits it.
-- **Enforce anything itself.** Actus supplies the declaration and — once a `2.0`
-  allows the stamp — makes it readable per request. The gate that *acts* on it is
-  application `Middleware`, and what "a valid session" means stays entirely the
-  application's. `audiences()` is one tree walk at startup and the Phase 2 bound is
-  compile-time; neither adds per-request work of its own.
-- **Guess an audience from the mount.** A controller under `public/` that forgot its
+- **Per-route labels.** The label is per-controller, matching `max_body_bytes`
+  and `rate_limit`; the floor semantics absorb the mixed case
+  (§ [The mixed controller](#the-mixed-controller-the-label-is-the-floor)). A
+  per-route override would be additive later, if a real consumer outgrows the floor.
+- **Enforce anything itself.** Actus supplies the declaration, the inventory, and
+  the accessor that lets application code act per request. The gate — middleware or
+  hook — is application code, and what "a valid credential" means stays entirely
+  the application's. `mounts()` is one tree walk at startup; the Phase 2 bound is
+  compile-time; the middleware gate costs one extra tree walk per request only in
+  applications that choose it.
+- **Guess a floor from the mount.** A controller under `public/` that forgot its
   label is precisely the case being caught; inferring `"anonymous"` for it would
   invert the feature.
 
-## Open questions for the review
+## Decisions taken in v2 — formerly the open questions
 
-1. **Is `audience` the right word?** It names the *caller*, which is the axis being
-   segregated, and it is the word the production consumer's own design document
-   already uses. Alternatives: `caller` (equally good, less established), `lane`
-   (the informal term in conversation; vague on its own), `posture` (overloaded —
-   it already means something else in that consumer's deployment vocabulary),
-   `access` (⛔ **reject** — it is the removed enum's word and would read as a
-   revived authorization feature, which is the one misreading this design must not
-   invite).
-
-2. **String label or type?** A string matches `rate_limit` and keeps the family rule
-   as ordinary data. A type (`#[controller(audience = Session)]`, family rule as
-   `HasAudience<Session>`) would move the *value* check to compile time too, not just
-   presence — strictly stronger. It costs the application a set of marker types, makes
-   the label unprintable in a route dump without extra work, and it is a much larger
-   macro change. I lean string, but the stronger guarantee deserves a hearing.
-
-3. **A new `Router` method, or extend `routes()`?** Principle 2 dislikes method
-   sprawl, and `Router` would then carry `routes()`, `rate_limit_classes()` and
-   `audiences()` — three walks over one tree, each answering a slice. The honest
-   alternative is one `Router::inventory()` returning a per-mount record (controller
-   name, audience, rate-limit class, body cap, `prepare` name, routes) with the
-   existing methods kept as thin projections. That is a better long-run surface and a
-   bigger change. **My inclination: build `audiences()` now, and open a separate
-   consolidation proposal** rather than growing the API twice.
-
-4. **Fix `rate_limit_classes()` to include absences?** It has the same blind spot and
-   the same argument applies weakly (an unlimited controller is usually intended). But
-   leaving two sibling methods with opposite emptiness semantics is a trap for the next
-   reader. Options: change it (a **breaking** change to its output — needs a `2.0`, so
-   realistically not); add `rate_limit_coverage()` alongside; or document the asymmetry
-   loudly and accept it. I lean on documenting it and pointing at `audiences()`.
-
-5. **A `families` entry matching no mount — warn or error?** A typo there silently
-   constrains nothing, which is the same failure the feature exists to prevent, one
-   level up. Erroring is tempting and symmetric; it also breaks the legitimate case of
-   a family declared before its first controller is written.
-
-6. **One controller type mounted in two families.** Observed in the production consumer:
-   a single controller type mounted at two prefixes belonging to different client
-   classes (same code, different base path). One type carries one label, so the family
-   rule must map a family to a **set** of acceptable audiences, not a single value —
-   the sketch above already does. Under Phase 2 the marker trait is per-type, so
-   presence still works; only the value needs the set. Is that sufficient, or is a
-   per-mount override in `app_routes!` warranted? I think the set is sufficient and the
-   override is speculative.
-
-7. **The genuinely mixed controller — is "split it" a good enough answer?** This is
-   the case that will come up first in any real application, and the label is
-   per-controller. An auth controller is the archetype: `login`, `register` and
-   `reset` are anonymous while `logout`, `me` and step-up re-authentication require an
-   existing session, so no single label is honest for the whole thing. Three answers:
-   **(a)** split it into an anonymous controller and an authenticated sibling — the
-   same answer the body-cap proposal gives, it costs only a second mount, and it
-   yields two controllers that each carry a *strong* claim; **(b)** allow a
-   deliberately weak label (`"mixed"`) that the family rule accepts, honest but
-   nearly contentless; **(c)** per-route audiences, which is real scope. I lean (a)
-   and think it should be stated as the recommended shape in the README, because the
-   alternative is every consumer independently discovering that their auth controller
-   does not fit.
-
-8. **Do the stamp and `#[non_exhaustive]` go on the [`2.0` docket](../2.0-docket.md)
-   as one item?** The
-   [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path) finding
-   says `Request` can take no new framework-populated field during `1.x`. If that is
-   accepted, the `2.0` list starts here and this is its first entry — and it is worth
-   asking whether an additive escape exists that this review missed (a typed
-   extensions slot on `Request` mirroring `Params::insert`/`get` would itself be a new
-   field, so it does not escape; nor does a private field, which breaks the same
-   literals).
+1. **The word** → `expects`, a credential-posture value; `audience` retired
+   (wrong axis on three counts — see [Naming](#naming-the-axis-then-the-word)).
+2. **String or type?** → **String.** It matches `rate_limit`, keeps the family
+   rule as ordinary data, and stays printable in a route dump. The stronger
+   compile-time *value* check does not require marker types anyway: `#[controller]`
+   could additionally emit `const EXPECTS: Option<&'static str>` and a `families`
+   block with values could emit a post-monomorphisation `const` assertion via a
+   `const fn` string compare — queued as a Phase 2 refinement, **to be
+   compile-probed against 1.88 before it is relied on**, as the
+   `on_unimplemented` mechanism was.
+3. **A new `Router` method or extend `routes()`?** → Neither: **ship the inventory
+   record now** (`Mount`, `#[non_exhaustive]`, growable in minors), with the
+   existing methods kept as documented projections. No third walk with a third
+   emptiness semantics.
+4. **Fix `rate_limit_classes()`?** → Keep its shape (changing it is breaking),
+   **document the asymmetry** in its rustdoc, point at `mounts()` for the
+   absence-inclusive view.
+5. **`families` entry matching no mount** → **error**; "warn" does not exist on
+   stable proc macros (see the sketch).
+6. **One type mounted in two families** → dissolved by the axis decision: a
+   credential-posture value is true at every mount of the type, and the family
+   rule maps a family to a **set** of acceptable floors. No per-mount override.
+7. **The mixed controller** → **the label is the floor**
+   (§ [The mixed controller](#the-mixed-controller-the-label-is-the-floor));
+   split when free, floor when shipped.
+8. **The stamp and `#[non_exhaustive]` on `Request`** → on the
+   [`2.0` docket](../2.0-docket.md) as **one item, demoted to an optimisation**;
+   the additive escape v1 asked for exists and is `Server::router()` +
+   `Router::match_controller` (an escape *through* `Request` does not — a typed
+   extensions slot or a private field each break the same struct literals).
 
 ## For a reviewer — what to attack, and what you can check
 
-This proposal is written to be argued with. Its claims are not all of the same kind,
-and knowing which is which is the difference between a useful review and a slow one.
+This proposal is written to be argued with. A first adversarial review ran on
+2026-08-30 — it re-derived every claim below, verified the consumer premises
+in the consumer, and produced this v2. Its corrections are folded in; what follows
+is updated for the next reviewer.
 
-### The load-bearing assumptions, in the order worth attacking
+### The load-bearing assumptions, with the first review's verdicts
 
 1. **That declaration coverage is worth anything at all.** The whole design rests on
    *"a claim that can be omitted silently is the failure; a claim that must be made is
-   the fix."* If a reviewer believes the real failure is that people write the wrong
-   policy rather than that they forget to declare one, the proposal is solving a
-   phantom and the right answer is Shape E alone. **This is the argument to make
-   first**, because everything else is downstream of it.
-2. **That false confidence is manageable.** A green coverage check says only that
-   every controller made a claim. If it gets read as "authentication is enforced" —
-   and it will be, by someone — the feature is *net negative*, because it stops
-   people looking. The mitigations here are naming and doc discipline, which is a
-   weak instrument against a strong misreading. A reviewer who thinks this cannot be
-   contained should say so; it is the strongest case against shipping.
-3. **That per-controller granularity is the right unit.** Open question #7 concedes
-   the archetype (an auth controller is irreducibly mixed) and answers "split the
-   controller." If that answer is wrong, the label needs per-route granularity and
-   this is a substantially larger proposal.
-4. **That `audience` will not be read as authorization.** See open question #1. Actus
-   deliberately removed an `Access` enum; if this reads to a newcomer as its return,
-   the naming has failed regardless of what the rustdoc says.
-5. **That Phase 2's grammar earns its place.** `families` is a permanent addition to
-   the macro that is meant to *be* the audit surface. A reviewer may reasonably hold
-   that Phase 1 plus a startup check is the whole feature and Phase 2 is gold-plating.
+   the fix."* *First review: upheld — the motivating incident was re-examined and was
+   precisely an omission, not a wrong policy; and the coverage count itself was
+   mis-measured twice in one day, which is the "the join exists nowhere" argument
+   made by the consumer's own history.*
+2. **That false confidence is manageable.** *First review: only if the label does
+   something.* A label nothing reads is documentation; a label the hook or gate reads
+   is a floor. The mitigation is the enforcement loop, not naming discipline — and
+   the floor definition makes the green check's honest meaning explicit.
+3. **That per-controller granularity is the right unit.** *First review: yes, with
+   floor semantics — without them, the first real consumer's auth controller breaks
+   the model.*
+4. **That the label will not be read as authorization.** *First review: the sharper
+   risk was the label being read on the wrong axis — resolved by the rename and the
+   floor definition.*
+5. **That Phase 2's grammar earns its place.** *First review: not yet — Phase 1 plus
+   the boot rule gives the same presence guarantee at boot, and the consumer boots in
+   CI. Unchanged: decide Phase 2 on a release cycle of evidence.*
 
 ### What you can verify yourself, in this repo
 
-Everything in this class is checkable and **should be checked rather than believed**:
+Everything in this class is checkable and **should be checked rather than believed**
+(all of it re-verified 2026-08-30):
 
 - `Router::rate_limit_classes()` skips undeclared controllers — read `walk_classes`
   in `crates/actus-server/src/router.rs`.
+- `Router::match_controller` is public, and `RouteMatch.controller` exposes the
+  `Controller` trait methods — same file.
+- `Router` is not `Clone`; `Server::new` moves it into a private `Arc`; no accessor
+  exists today — `crates/actus-server/src/server.rs`.
 - The `Controller` trait surfaces routes, body cap, rate-limit class and name, and
   nothing about `prepare` — read the trait in `crates/actus-controller/src/lib.rs`
   and the methods the macro emits in `crates/actus-controller/macros/src/lib.rs`.
 - The `[Access::*]` rejection still exists in that macro (the tombstone the design
   must not reopen).
-- `app_routes!` holds the mount literal and the construction *expression*, which is
-  what makes Phase 2's pass-through wrapper viable without type extraction — read
-  `generate_app_routes`.
+- `app_routes!` holds the mount literal and the construction *expression*, and emits
+  `Arc::new(expr)` — which is what makes Phase 2's pass-through wrapper viable and
+  its bound universal — read `generate_app_routes`.
+- The middleware `before` chain runs after routing and **before** `Params` exists —
+  read the lifecycle comment and body of `handle_request_inner` in
+  `crates/actus-server/src/server.rs`.
 - **The MSRV probe.** Re-run it; do not take the pasted output on faith:
   `rustc +1.88 --edition 2024` on a file with the `on_unimplemented` trait, a
   conforming type and a non-conforming one.
-- **The semver finding**, which the whole Enforcement section turns on — run the
-  query in [`../2.0-docket.md`](../2.0-docket.md) § 1 and confirm that no public enum
-  or all-public struct is `#[non_exhaustive]`. If that is wrong, the stamp belongs in
-  Phase 1 after all and this proposal changes shape.
+- **The semver finding** — run the query in [`../2.0-docket.md`](../2.0-docket.md)
+  § 1 and confirm that no public enum or all-public struct is `#[non_exhaustive]`.
 
-### What you cannot verify, and should treat as premise
+### What you cannot verify from this repo, and should treat as premise
 
-The claims about the production consumer — the 47/49 controller counts, the
-`prepare` hook being permissive rather than gating, the mixed auth surface, "this has
-happened in production" — come from a **private codebase this repo does not contain**
-and were supplied by the project owner. A reviewer cannot check them here.
+The claims about the production consumer — the controller and hook counts, the
+permissive shared hook, the mixed auth surface, the twice-mounted controller type,
+"this has happened in production" — come from a **private codebase this repo does
+not contain**. The first review verified each of them *in that codebase* on
+2026-08-30, but a reader here still cannot. ⇒ **Do not spend time trying.** Do
+challenge them *as premises*: if the motivating failure is better explained by
+something other than a missing declaration, the case weakens no matter how sound
+the mechanism. Ask for the evidence rather than assuming it.
 
-⇒ **Do not spend time trying.** Do challenge them *as premises*: if the motivating
-failure has not actually occurred, or if it is better explained by something other
-than a missing declaration, the case for the feature weakens no matter how sound the
-mechanism is. Ask for the evidence rather than assuming it.
+### Where this proposal has been wrong — the running list
 
-### Where this proposal has already been wrong once
+Stated so a reviewer knows the error rate is not zero, and what shape the errors
+take (so far: every one is an **unchecked additivity or completeness claim**):
 
-Stated so a reviewer knows the error rate is not zero. An earlier draft folded the
-`Request` stamp into Phase 1 and called both phases *purely additive*. Checking the
-struct disproved it — `Request` is all-public with no `#[non_exhaustive]`, so the
-field is a major change. **The same class of error may still be present elsewhere in
-this document**; the additivity claims in § Scope and § Why now are the ones to
-re-derive rather than read.
+- An early draft folded the `Request` stamp into Phase 1 and called it additive;
+  checking the struct disproved it (`Request` is all-`pub`, no `#[non_exhaustive]`).
+- v1 then concluded the stamp was the only path to a per-request gate; checking the
+  `Router` surface disproved *that* — `match_controller` was public all along, and
+  one accessor closes the gap. The stamp is an optimisation.
+- v1's inventory struct was itself all-`pub` with no `#[non_exhaustive]` — the
+  docket's finding, repeated while citing the docket.
+- v1's coverage sketch failed every mount *outside* a family (`"health"`, the `"*"`
+  shell), contradicting its own comment two lines up.
+- v1 offered "warn" for an unmatched `families` entry; stable proc macros cannot
+  warn.
+- v1's pasted compiler output was incomplete; v2's is the full paste.
+- v1 claimed downstream `Request` struct literals are "the natural shape for a
+  middleware unit test in any consumer"; the measured consumer has none. (Actus's
+  own tests do — the constructor need on the docket stands, scoped.)
+
+**The same class of error may still be present.** The additivity claims in § Scope
+and the claim that `Server::router()` + `match_controller` is gate-sufficient are
+the ones to re-derive rather than read.
 
 ## Estimated effort
 
-**Phase 1** — roughly 150–250 lines across three crates:
-- macro attribute parsing + `actus_audience` emission (~40)
-- `MountAudience` + `Router::audiences()` + walk (~50)
-- tests (~60)
-- `examples/advanced` coverage check + its two tests (~50)
+**Phase 1** — roughly 250–350 lines across three crates:
+- macro: `expects` parsing + `actus_expects` / `actus_prepare` emission (~50)
+- `Mount` + `Router::mounts()` walk + `Server::router()` (~60)
+- tests (~80)
+- `examples/advanced`: `family_coverage` + the gate middleware + their tests (~90)
 - README + rustdoc (prose)
 
-**Queued for `2.0`** — trivial in code, expensive in version: `#[non_exhaustive]` on
-`Request` + the `audience` field + one line at the stamp site (~10), plus updating
-every `Request` literal in the workspace's own tests (~6 sites).
+**Queued for `2.0`** — trivial in code, expensive in version, and now merely an
+optimisation: `#[non_exhaustive]` on `Request` + the `expects` field + one line at
+the stamp site, plus a `Request` constructor for fixtures.
 
 **Phase 2** — roughly 200–300 lines on top:
-- `families` parsing in `AppRoutesInput` + prefix matching + construction wrapping (~90)
-- `DeclaresAudience`, the diagnostic, the pass-through fn, `__internal` re-export (~40)
+- `families` parsing in `AppRoutesInput` + prefix matching (with `*`-sugar
+  stripping) + construction wrapping (~90)
+- `DeclaresExpectation`, the diagnostic, the pass-through fn, `__internal`
+  re-export (~40)
 - `trybuild` compile-fail tests (~60, plus a new dev-dependency and a `cargo-deny`
   licence pass on it — the workspace has no `trybuild` today, and adding a
   dev-dependency is the one part of this that touches the supply chain)
@@ -745,13 +888,14 @@ every `Request` literal in the workspace's own tests (~6 sites).
 ## Why now, why not later
 
 **Neither phase is blocked by the 1.0 freeze**, which is the unusual and comfortable
-part: a defaulted trait method, a new `Router` method, a new attribute key and a new
-optional macro block are all additive. There is no forcing function, and this can rest.
+part: defaulted trait methods, a `#[non_exhaustive]` struct, new `Router`/`Server`
+methods, a new attribute key and a new optional macro block are all additive. There
+is no forcing function, and this can rest.
 
 The argument for doing it anyway is that the cost of *not* having it is paid by
-someone else, quietly, and is only ever discovered in production. The production
-consumer's families are correct today — but that is a fact established by hand, by
-reading 49 files, on one afternoon, and it decays the moment the next controller
+someone else, quietly, and is only ever discovered in production — as it already
+was, once. The production consumer's families are correct today, but that is a fact
+established by hand, on one afternoon, and it decays the moment the next controller
 lands. Every application with a segregated route surface has this problem and none
 of them can solve it without the route tree.
 
@@ -760,13 +904,14 @@ the one macro that is meant to be the whole audit surface, and it should not be
 designed twice. Phase 1 buys the information needed to design it well — including
 whether the string label survives contact with a second consumer.
 
-⚠️ **One thing found while writing this does not wait for either phase.** `Request`
-is a plain all-public struct, so it can take no new framework-populated field before a
-`2.0` (§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)).
-That constraint exists whether or not this proposal is ever built, it applies to every
-future "stamp the matched route's X onto the request" idea, and it is cheaper to
-record now than to rediscover from a failed `cargo semver-checks` later.
+⇒ **Suggested order:**
 
-⇒ **Suggested order: ship Phase 1, use it in the production consumer for a release
-cycle, then decide Phase 2 on evidence.** That is the same discipline the body-cap
-proposal applied to its own Phase 2, and for the same reason.
+1. **`cargo-semver-checks` in CI first** (the [`2.0` docket](../2.0-docket.md) § 3
+   already calls for it). This proposal asserts additivity and has been wrong about
+   additivity twice; make the claim machine-checked before the first additive
+   release ships.
+2. **Ship Phase 1** as a minor release, use it in the production consumer for a
+   release cycle — the coverage check, the declaration-aware hook, the probe test
+   with its authenticated controls.
+3. **Decide Phase 2 on that evidence.** The same discipline the body-cap proposal
+   applied to its own Phase 2, and for the same reason.
