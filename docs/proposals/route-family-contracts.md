@@ -648,6 +648,79 @@ insists on the claim; the application supplies the probe that checks it.**
    field, so it does not escape; nor does a private field, which breaks the same
    literals).
 
+## For a reviewer — what to attack, and what you can check
+
+This proposal is written to be argued with. Its claims are not all of the same kind,
+and knowing which is which is the difference between a useful review and a slow one.
+
+### The load-bearing assumptions, in the order worth attacking
+
+1. **That declaration coverage is worth anything at all.** The whole design rests on
+   *"a claim that can be omitted silently is the failure; a claim that must be made is
+   the fix."* If a reviewer believes the real failure is that people write the wrong
+   policy rather than that they forget to declare one, the proposal is solving a
+   phantom and the right answer is Shape E alone. **This is the argument to make
+   first**, because everything else is downstream of it.
+2. **That false confidence is manageable.** A green coverage check says only that
+   every controller made a claim. If it gets read as "authentication is enforced" —
+   and it will be, by someone — the feature is *net negative*, because it stops
+   people looking. The mitigations here are naming and doc discipline, which is a
+   weak instrument against a strong misreading. A reviewer who thinks this cannot be
+   contained should say so; it is the strongest case against shipping.
+3. **That per-controller granularity is the right unit.** Open question #7 concedes
+   the archetype (an auth controller is irreducibly mixed) and answers "split the
+   controller." If that answer is wrong, the label needs per-route granularity and
+   this is a substantially larger proposal.
+4. **That `audience` will not be read as authorization.** See open question #1. Actus
+   deliberately removed an `Access` enum; if this reads to a newcomer as its return,
+   the naming has failed regardless of what the rustdoc says.
+5. **That Phase 2's grammar earns its place.** `families` is a permanent addition to
+   the macro that is meant to *be* the audit surface. A reviewer may reasonably hold
+   that Phase 1 plus a startup check is the whole feature and Phase 2 is gold-plating.
+
+### What you can verify yourself, in this repo
+
+Everything in this class is checkable and **should be checked rather than believed**:
+
+- `Router::rate_limit_classes()` skips undeclared controllers — read `walk_classes`
+  in `crates/actus-server/src/router.rs`.
+- The `Controller` trait surfaces routes, body cap, rate-limit class and name, and
+  nothing about `prepare` — read the trait in `crates/actus-controller/src/lib.rs`
+  and the methods the macro emits in `crates/actus-controller/macros/src/lib.rs`.
+- The `[Access::*]` rejection still exists in that macro (the tombstone the design
+  must not reopen).
+- `app_routes!` holds the mount literal and the construction *expression*, which is
+  what makes Phase 2's pass-through wrapper viable without type extraction — read
+  `generate_app_routes`.
+- **The MSRV probe.** Re-run it; do not take the pasted output on faith:
+  `rustc +1.88 --edition 2024` on a file with the `on_unimplemented` trait, a
+  conforming type and a non-conforming one.
+- **The semver finding**, which the whole Enforcement section turns on — run the
+  query in [`../2.0-docket.md`](../2.0-docket.md) § 1 and confirm that no public enum
+  or all-public struct is `#[non_exhaustive]`. If that is wrong, the stamp belongs in
+  Phase 1 after all and this proposal changes shape.
+
+### What you cannot verify, and should treat as premise
+
+The claims about the production consumer — the 47/49 controller counts, the
+`prepare` hook being permissive rather than gating, the mixed auth surface, "this has
+happened in production" — come from a **private codebase this repo does not contain**
+and were supplied by the project owner. A reviewer cannot check them here.
+
+⇒ **Do not spend time trying.** Do challenge them *as premises*: if the motivating
+failure has not actually occurred, or if it is better explained by something other
+than a missing declaration, the case for the feature weakens no matter how sound the
+mechanism is. Ask for the evidence rather than assuming it.
+
+### Where this proposal has already been wrong once
+
+Stated so a reviewer knows the error rate is not zero. An earlier draft folded the
+`Request` stamp into Phase 1 and called both phases *purely additive*. Checking the
+struct disproved it — `Request` is all-public with no `#[non_exhaustive]`, so the
+field is a major change. **The same class of error may still be present elsewhere in
+this document**; the additivity claims in § Scope and § Why now are the ones to
+re-derive rather than read.
+
 ## Estimated effort
 
 **Phase 1** — roughly 150–250 lines across three crates:
