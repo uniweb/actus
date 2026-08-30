@@ -2,13 +2,16 @@
 
 **Owner:** Diego Macrini
 
-**Status:** PROPOSAL v2 — 2026-08-30. Nothing here has shipped. Revised the same day as v1
-after an adversarial review that re-derived every checkable claim against the code and
-re-verified the consumer premises in the consumer; the eight questions v1 left open are
-**decided** below, and the review's corrections are folded in (the running errors list is in
-[For a reviewer](#for-a-reviewer--what-to-attack-and-what-you-can-check)).
-Two phases, separately shippable; Phase 1 stands alone and solves the reported problem,
-Phase 2 moves the *presence* half of the same check from boot to compile time.
+**Status:** PARTIAL — **Phase 1 shipped 2026-08-30**, as specified below: the `expects`
+floor label, `Controller::actus_expects()` / `actus_prepare()`, the `#[non_exhaustive]`
+`Mount` inventory via `Router::mounts()`, and `Server::router()`; worked example in
+`examples/advanced` (`family_coverage` + `FloorGate` + tests), user docs in README
+§ "Route families". **Phase 2** (the compile-time `families` block) is **deferred pending
+a release cycle of real Phase 1 use**, per § Why now — it is design-recorded here, not
+scheduled. *(Doc history: v2, revised 2026-08-30 after an adversarial review that
+re-derived every checkable claim and verified the consumer premises; the eight questions
+v1 left open are **decided** below, and the running errors list is in
+[For a reviewer](#for-a-reviewer--what-to-attack-and-what-you-can-check).)*
 **Scope:** post-1.0 API addition. Everything in both phases is **purely additive** — a
 defaulted trait method or two, one `#[non_exhaustive]` struct, a `Router` method, a `Server`
 accessor, a `#[controller]` attribute key, and an optional `app_routes!` block. Neither

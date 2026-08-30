@@ -428,7 +428,7 @@ Requires the `openapi` feature — `actus = { version = "…", features = ["open
 
 ## Middleware
 
-`Server::with_middleware(...)` registers a `Middleware` — for *application* cross-cutting concerns (logging, auth gates, request IDs, maintenance mode, caching, …). HTTP-protocol concerns (CORS, body limits, compression) are named server features and live outside the chain — see [Principles](#principles), point 1. Implement either hook (both have default no-op impls):
+`Server::with_middleware(...)` registers a `Middleware` — for *application* cross-cutting concerns (logging, auth gates, request IDs, maintenance mode, caching, …). HTTP-protocol concerns (CORS, body limits, compression) are named server features and live outside the chain — see [Principles](#design-principles), point 1. Implement either hook (both have default no-op impls):
 
 ```rust
 use actus::prelude::*;
@@ -463,6 +463,74 @@ The exceptions:
 - **Pre-parse failures** — a request hyper itself can't parse never reaches the `Request` skeleton, so there's nothing to hand the hook.
 
 `after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.). To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter.
+
+## Route families
+
+A coverage check for client-segregated route surfaces — **coverage, not authorization**. Applications often name their caller classes with top-level prefixes: `api/` for the session-authed app, `public/` for anonymous readers, `hooks/` for signature-verified webhooks. Each prefix carries an invariant — *everything under here expects the same kind of caller* — and normally nothing checks it: a controller mounted under `api/` that forgets its auth hook compiles, serves, and is wrong, silently, because an **omission produces no artifact** a reviewer, a grep, or a test can find. Route families make the omission representable, and therefore catchable.
+
+**The declaration is a floor.** A controller states the *least-privileged caller it is written to accept*:
+
+```rust
+#[controller(expects = "credential", prepare = Self::auth)]
+impl ThingController { /* ... */ }
+```
+
+The value is an opaque `&'static str` — Actus never interprets it; `"credential"` / `"anonymous"` / `"signature"` are conventions your application owns. A floor is not a ceiling: `expects = "anonymous"` means anonymous callers are accepted *somewhere* on the controller and says nothing about routes that demand more in their handlers. That is how a genuinely mixed controller — an auth controller whose `login` is anonymous but whose `logout` requires a session — declares itself honestly: state the weakest route's floor, keep the per-handler checks. When a split is free, prefer it (two controllers each carrying a strong claim beat one carrying a weak one); when the URLs are already shipped, the floor costs nothing.
+
+**The inventory includes absences.** `Router::mounts()` returns one `Mount` row per mounted controller — mount path, controller name, `expects`, `prepare` (hook presence), rate-limit class, body cap. A controller that declared nothing appears with `expects: None` rather than being skipped, which is the entire point: the omission has to be data before a check can catch it. Your application owns the rule and runs it once at boot:
+
+```rust
+const FAMILIES: &[(&str, &[&str])] = &[
+    ("public", &["anonymous"]),
+    ("api",    &["credential", "anonymous"]),  // "anonymous": the login carve-outs, deliberate
+    ("hooks",  &["signature"]),
+];
+
+fn family_coverage(router: &Router) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for m in router.mounts() {
+        let family = m.mount.split('/').next().unwrap_or("");
+        let Some((_, floors)) = FAMILIES.iter().find(|(f, _)| *f == family) else {
+            continue; // not under a family ("health", a root catch-all): unconstrained
+        };
+        match m.expects {
+            None => bad.push(format!("{} at `{}` declares no caller expectation", m.controller, m.mount)),
+            Some(e) if !floors.contains(&e) => bad.push(format!("{} at `{}` declares {e:?}, not accepted by `{family}`", m.controller, m.mount)),
+            Some("credential") if m.prepare.is_none() => bad.push(format!("{} at `{}` expects a credential but has no `prepare` hook", m.controller, m.mount)),
+            _ => {}
+        }
+    }
+    if bad.is_empty() { Ok(()) } else { Err(bad.join("\n")) }
+}
+```
+
+Every carve-out is now a line of code somebody had to write, in one table a reviewer reads top to bottom.
+
+**Per-request enforcement keys on the declaration, not the path.** `Server::router()` shares the route tree the server serves, so a middleware can ask the framework's own longest-prefix matcher which controller a request will reach and read its floor — no path allow-list, no re-implemented matching, and a controller mounted somewhere new is covered the moment it is mounted:
+
+```rust
+let server = Server::new(router);
+let gate = FloorGate { router: server.router() };  // Arc<Router>
+let server = server.with_middleware(gate);
+```
+
+```rust
+async fn before(&self, req: &mut Request) -> Result<Outcome, WebError> {
+    if let Some(rm) = self.router.match_controller(&req.path_parts)
+        && rm.controller.actus_expects() == Some("credential")
+        && !req.headers.contains_key("authorization")
+    {
+        return Err(WebError::Unauthorized);
+    }
+    Ok(Outcome::Continue)
+}
+```
+
+A presence check like this is deliberately a *floor*: validating the credential needs your store and belongs where it lives today. If that place is a shared `prepare` hook, the hook can read `self.actus_expects()` and enforce its own floor with the credential resolved once — and the coverage rule above ("a `"credential"` floor requires a hook", via `Mount.prepare`) guarantees every such controller has one.
+
+**What a green check means** — every controller stated its floor, and every floor is one its family accepts. It does **not** mean authentication is enforced; Actus stays policy-agnostic. The declaration does make that claim testable: walk `mounts()`, fire an unauthenticated request at each route, assert a `"credential"` floor never answers `200` — and pair every probe with an authenticated control that must get its `200`, so a dead route can't pass as a guarded one.
+
+Working code: `examples/advanced` (`family_coverage`, `FloorGate`, and their unit + integration tests, wired into its `--check` flag). Design record: [`docs/proposals/route-family-contracts.md`](docs/proposals/route-family-contracts.md).
 
 ## Body caps
 
@@ -992,7 +1060,8 @@ What's there today:
   - `Server::with_max_inflight_body_bytes(n)` — semaphore over body-buffer memory. Each `from_hyper` call reserves its per-request cap from this budget; over-budget requests get `503 Service Unavailable` (`WebError::Busy`) with `Retry-After`. Caps total framework-side buffering at `n` bytes regardless of connection count.
   - `Server::with_header_read_timeout(d)` — forwards to hyper's `http1::Builder::header_read_timeout`. Catches slowloris and clients that TCP-connect-and-send-nothing.
 - **`app_routes!`** with `deps` and per-route service injection (auto-clone of struct-literal shorthand, bare-ident `target: source` form, and `..base`).
-- **`#[controller]` + `routes!`** with HTTP verbs, path patterns, type-safe query/body extraction, defaults, strict/lax modes, the `prepare = ...` hook (returns `Ok(None)`, a custom early-return reply, or an error), and per-controller knobs `#[controller(max_body_bytes = …)]` / `#[controller(rate_limit = "class")]`. Actus is **policy-agnostic** — authorization lives in your application's policy layer, called from the prepare hook and/or handlers.
+- **`#[controller]` + `routes!`** with HTTP verbs, path patterns, type-safe query/body extraction, defaults, strict/lax modes, the `prepare = ...` hook (returns `Ok(None)`, a custom early-return reply, or an error), and per-controller knobs `#[controller(max_body_bytes = …)]` / `#[controller(rate_limit = "class")]` / `#[controller(expects = "floor")]`. Actus is **policy-agnostic** — authorization lives in your application's policy layer, called from the prepare hook and/or handlers.
+- **Route families** — `#[controller(expects = "…")]` declares the least-privileged caller a controller accepts (a floor; an opaque label the framework never interprets); `Router::mounts()` returns the per-mount inventory — floor, `prepare` presence, rate-limit class, body cap, one row per mounted controller, **absences included** — for a startup coverage check that turns a silently-undeclared controller into a boot failure; `Server::router()` shares the route tree so a middleware gate can key on the declaration via the framework's own matcher. Coverage, not authorization — see [Route families](#route-families).
 - **Per-request state carry**: `prepare` hooks stash typed values via `params.insert::<T>(value)`; handlers read them by declaring `params: &Params` and calling `params.get::<T>()`.
 - **Longest-prefix routing** at arbitrary depth, with multi-segment patterns inside controllers and a trailing `{...rest}` catch-all path parameter.
 - **Query as a multimap** — repeated keys accumulate; `Vec<String>` params get all values; `params.query()` for "catch the rest". Form-urlencoded bodies fold into the same map.
@@ -1023,7 +1092,7 @@ Actus is **1.0** — an API-stability commitment. Breaking changes now go throug
 - **A real consumer shipped against it.** A substantial production backend built on Actus — 27 controllers across ~13 k lines — exercises the core continuously: `app_routes!` / `routes!`, `#[controller(prepare = …)]` auth hooks, `Params`, `WebError`, `reply!`, `ReplyData`, `Outcome`, and a custom `Middleware`. The stress runbooks in `scripts/stress/` add load-shape confidence (124 k req/s on `/health`, 5 k concurrent WebSockets, no FD leak).
 - **The public API was deliberately reviewed.** Every public type, method, trait, and macro option was auditioned for naming, shape, and docs. The surface the real consumer leans on is committed to; every public item carries a `///` (enforced by `#![warn(missing_docs)]`); and the late-0.4 surface the consumer doesn't yet exercise got its own once-over before the freeze (see [`docs/1.0-freeze-audit.md`](docs/1.0-freeze-audit.md)).
 
-What's deliberately deferred is additive, not breaking: per-route body caps and timeouts (today's are per-controller and server-wide; see [`docs/proposals/per-route-body-caps.md`](docs/proposals/per-route-body-caps.md)) and streaming-body compression both slot in without a `2.0`. A route-family coverage check — letting an application declare that every controller under a mount prefix must state what it expects of its callers, so an omission fails instead of passing silently — is under design in [`docs/proposals/route-family-contracts.md`](docs/proposals/route-family-contracts.md). See [Not built in](#not-built-in) for the by-design omissions.
+What's deliberately deferred is additive, not breaking: per-route body caps and timeouts (today's are per-controller and server-wide; see [`docs/proposals/per-route-body-caps.md`](docs/proposals/per-route-body-caps.md)) and streaming-body compression both slot in without a `2.0`. Route families shipped their Phase 1 — the `#[controller(expects = "…")]` floor, the `Router::mounts()` inventory, and `Server::router()` (see [Route families](#route-families)); Phase 2, a compile-time `families` block in `app_routes!`, is deferred until Phase 1 has a release cycle of real use behind it ([`docs/proposals/route-family-contracts.md`](docs/proposals/route-family-contracts.md)). See [Not built in](#not-built-in) for the by-design omissions.
 
 ## Comparison
 
