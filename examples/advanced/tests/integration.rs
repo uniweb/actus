@@ -422,6 +422,47 @@ async fn rate_limit_returns_429_with_retry_after() {
 }
 
 #[tokio::test]
+async fn floor_gate_refuses_anonymous_before_anything_else() {
+    // Pattern under test: the declaration-keyed floor gate. `MeController`
+    // declares `expects = "credential"`; `FloorGate` reads that off the
+    // matched controller (via `server.router()` + `match_controller`) and
+    // refuses a request that presents nothing at all — with a
+    // self-describing title, which is how we know THIS refusal came from
+    // the gate and not from the handler's `require_user()`.
+    let d = Daemon::spawn().await;
+
+    let (status, _, body) = d.get("/api/me", &[]).await;
+    assert_eq!(status, 401, "bare-anonymous → refused at the floor");
+    let problem = parse_json(&body);
+    assert_eq!(problem["title"], "Credential Required");
+
+    // A garbage credential *passes the presence floor* and is then refused
+    // by the hook (`lax_auth` fails to resolve it) — same status, different
+    // title. The gate is defense in depth, not the auth system.
+    let (status, _, body) = d
+        .get("/api/me", &[("Authorization", "Bearer not-a-real-token")])
+        .await;
+    assert_eq!(status, 401, "unresolvable credential → refused by the hook");
+    let problem = parse_json(&body);
+    assert_ne!(
+        problem["title"], "Credential Required",
+        "past the gate; this 401 is the hook's"
+    );
+
+    // A real credential sails through both.
+    let (status, _, _) = d
+        .get("/api/me", &[("Authorization", "Bearer alice-token")])
+        .await;
+    assert_eq!(status, 200);
+
+    // And the gate does not touch an `"anonymous"`-floor controller:
+    // anonymous reads on /api/tasks keep working (its writes are gated
+    // per-handler, asserted elsewhere).
+    let (status, _, _) = d.get("/api/tasks", &[]).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
 async fn unclassed_route_is_not_rate_limited() {
     // The flip side of the per-class label: `HealthController` declares no
     // `rate_limit`, so its `rate_limit_class` is `None` and the limiter

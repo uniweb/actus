@@ -34,6 +34,19 @@
 //!   `#[controller(max_body_bytes = 4 * KIB)]` to refuse oversized JSON
 //!   bodies before allocating. Compare with the global cap on
 //!   `Server::with_max_body_bytes`.
+//! - **Route families: floor, coverage, gate** (README §"Route families") —
+//!   each controller under `api/` declares the least-privileged caller it
+//!   accepts (`#[controller(expects = "…")]`): `MeController` is
+//!   `"credential"`, `TasksController` is `"anonymous"` (reads are open;
+//!   writes gate per-handler). `family_coverage` walks `Router::mounts()` at
+//!   boot and fails on a controller that declared nothing, declared a floor
+//!   the family doesn't accept, or declared `"credential"` with no `prepare`
+//!   hook. `FloorGate` then enforces the floor per request: it reads the
+//!   declaration off the matched controller via `server.router()` +
+//!   `match_controller` and refuses un-credentialed callers on
+//!   `"credential"` mounts before the handler runs. `HealthController`
+//!   declares nothing and is mounted outside every family — unconstrained
+//!   by construction.
 //!
 //! The integration tests in `tests/integration.rs` exercise the daemon-guard
 //! pattern: spawn this binary as a subprocess, run real HTTP requests, let
@@ -453,6 +466,121 @@ fn rate_limit_coverage(router: &Router, limiter: &RateLimit) -> Result<(), Strin
 }
 
 // ============================================================================
+// Pattern: route families — floor coverage at boot + a declaration-keyed gate
+// ============================================================================
+//
+// The controllers declare a *floor* (`#[controller(expects = "…")]` — the
+// least-privileged caller they accept); this application owns what the floors
+// mean and which floors each mount-prefix family accepts. Two pieces:
+//
+// - `family_coverage` runs once at boot over `Router::mounts()` — the
+//   absence-inclusive inventory — and fails fast on the three ways a
+//   controller can be wrong about its family: declaring nothing, declaring a
+//   floor the family doesn't accept, or declaring `"credential"` without a
+//   `prepare` hook to resolve one.
+// - `FloorGate` enforces the `"credential"` floor per request, keyed to the
+//   *declaration* rather than the path: it asks the framework's own matcher
+//   (`server.router()` + `match_controller`) which controller the request
+//   will reach and refuses it up front if the controller expects a
+//   credential and none was presented. No path allow-list anywhere — the
+//   carve-outs are the `"anonymous"` declarations on the controllers
+//   themselves, so a controller mounted somewhere new is covered the moment
+//   it is mounted.
+
+/// Which floors each route-family (top-level mount prefix) accepts. A mount
+/// whose first segment is in no family — `health`, a root catch-all — is
+/// unconstrained.
+const FAMILIES: &[(&str, &[&str])] = &[
+    // `"anonymous"` is the deliberate carve-out lane: reads-open controllers
+    // like `TasksController` declare it and gate writes per-handler.
+    ("api", &["credential", "anonymous"]),
+];
+
+/// Startup coverage check: every controller mounted under a family prefix
+/// must declare a floor the family accepts — and a `"credential"` floor must
+/// come with a `prepare` hook, because the hook is what resolves the
+/// credential the floor promises to require. Run once at boot (and via
+/// `--check`); one router walk, no per-request cost.
+///
+/// This is the check `rate_limit_coverage` cannot be the template for:
+/// there, an undeclared controller is legitimately unlimited and is skipped;
+/// here, the *omission is the failure being hunted*, which is why this walks
+/// `Router::mounts()` (a row per mounted controller, absences included).
+fn family_coverage(router: &Router) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for m in router.mounts() {
+        let family = m.mount.split('/').next().unwrap_or("");
+        // Not under a declared family → unconstrained (`health`, `*`, …).
+        let Some((_, floors)) = FAMILIES.iter().find(|(f, _)| *f == family) else {
+            continue;
+        };
+        match m.expects {
+            None => bad.push(format!(
+                "  - {} at `{}` declares no caller expectation (add `expects = …` \
+                 to its #[controller] attribute)",
+                m.controller, m.mount
+            )),
+            Some(e) if !floors.contains(&e) => bad.push(format!(
+                "  - {} at `{}` declares {:?}, which family `{}` does not accept \
+                 (accepted: {:?})",
+                m.controller, m.mount, e, family, floors
+            )),
+            Some("credential") if m.prepare.is_none() => bad.push(format!(
+                "  - {} at `{}` expects a credential but has no `prepare` hook \
+                 to resolve one",
+                m.controller, m.mount
+            )),
+            _ => {}
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        bad.sort();
+        Err(format!(
+            "route-family coverage failed — a controller must state what it \
+             expects of its callers before it can join a family:\n{}",
+            bad.join("\n"),
+        ))
+    }
+}
+
+/// Declaration-keyed floor gate: refuses a request to a `"credential"`-floor
+/// controller when no credential was presented at all, before the handler
+/// (or its `prepare` hook) runs. Presence-only by design — *validating* a
+/// credential needs the store and stays in the hook; a bad token passes this
+/// gate and is refused there. Defense in depth, not the auth system.
+struct FloorGate {
+    /// The route tree the server serves ([`Server::router`]) — so the gate
+    /// uses the framework's own longest-prefix matcher instead of
+    /// re-deriving it.
+    router: Arc<Router>,
+}
+
+#[async_trait]
+impl Middleware for FloorGate {
+    async fn before(&self, request: &mut Request) -> Result<Outcome, WebError> {
+        let Some(rm) = self.router.match_controller(&request.path_parts) else {
+            return Ok(Outcome::Continue); // no route → the 404 path handles it
+        };
+        if rm.controller.actus_expects() == Some("credential")
+            && !request.headers.contains_key("authorization")
+        {
+            // Self-describing 401 so a client (and the integration test) can
+            // tell the gate's refusal from a handler's: the floor was
+            // "credential" and nothing at all was presented.
+            return Err(WebError::Problem(
+                ProblemDetails::new(StatusCode::UNAUTHORIZED, "Credential Required").detail(
+                    "this endpoint's caller floor is \"credential\"; send an \
+                     Authorization header",
+                ),
+            ));
+        }
+        Ok(Outcome::Continue)
+    }
+}
+
+// ============================================================================
 // Pattern: typed JSON body with informative 400
 // ============================================================================
 //
@@ -501,7 +629,11 @@ impl HealthController {
 
 struct MeController;
 
-#[controller(prepare = Self::auth, rate_limit = "auth")]
+// `expects = "credential"` is this controller's *floor*: its one route
+// requires a resolved user, so refusing bare-anonymous callers up front (see
+// `FloorGate`) loses nothing and catches misconfiguration early. The hook
+// stays `lax_auth` — the floor is a declaration, the hook is the resolver.
+#[controller(prepare = Self::auth, rate_limit = "auth", expects = "credential")]
 impl MeController {
     routes! {
         GET "" => me(params: &Params),
@@ -536,7 +668,12 @@ struct TasksController {
 // (e.g. an `attach` endpoint), the cleanest pattern is to split it into
 // a sibling controller with a higher cap, mounted at a sibling path —
 // see the README §"Body caps" for the pattern.
-#[controller(prepare = Self::auth, max_body_bytes = 4 * KIB, rate_limit = "tasks")]
+// `expects = "anonymous"` — the floor is the *weakest* route's requirement:
+// GET list/get are open to anonymous callers, so `"anonymous"` is the honest
+// label even though create/update/delete demand roles in their handlers. A
+// mixed controller declares its floor; the stricter routes keep their
+// per-handler checks (README §"Route families").
+#[controller(prepare = Self::auth, max_body_bytes = 4 * KIB, rate_limit = "tasks", expects = "anonymous")]
 impl TasksController {
     routes! {
         GET ""        => list(page: u32 = 1, limit: u32 = 20, tags: Vec<String>),
@@ -653,14 +790,27 @@ async fn main() -> anyhow::Result<()> {
     if let Err(msg) = rate_limit_coverage(&router, &limiter) {
         anyhow::bail!("{msg}");
     }
+    // Same fail-fast shape for the route-family floors: every controller
+    // under `api/` must declare one the family accepts.
+    if let Err(msg) = family_coverage(&router) {
+        anyhow::bail!("{msg}");
+    }
     if check_only {
         println!("rate-limit class coverage OK");
+        println!("route-family coverage OK");
         return Ok(());
     }
 
-    Server::new(router)
+    let server = Server::new(router);
+    // The gate reads declarations off the route tree the server serves —
+    // `router()` shares it, so there's exactly one matcher and one tree.
+    let floor_gate = FloorGate {
+        router: server.router(),
+    };
+    server
         .with_middleware(RequestLogger)
         .with_middleware(limiter)
+        .with_middleware(floor_gate)
         .with_cors(CorsLayer::permissive())
         .with_request_timeout(Duration::from_secs(10))
         .run(port)
@@ -696,5 +846,106 @@ mod tests {
             .class("auth", 10, 0.2)
             .class("tasks", 30, 0.5);
         assert!(rate_limit_coverage(&router, &limiter).is_ok());
+    }
+
+    #[tokio::test]
+    async fn family_coverage_passes_for_the_real_routes() {
+        // MeController declares "credential" (with a hook), TasksController
+        // declares "anonymous", HealthController is outside every family.
+        let router = init(Storage::new()).await.expect("init");
+        assert!(family_coverage(&router).is_ok());
+    }
+
+    // The three ways a controller can be wrong about its family, as
+    // macro-generated controllers (not hand impls) so the attribute →
+    // `Router::mounts()` path is what's under test.
+
+    struct NoFloor;
+    #[controller]
+    impl NoFloor {
+        routes! { "" => idx() }
+        async fn idx(&self) -> Reply {
+            reply!()
+        }
+    }
+
+    struct WrongFloor;
+    #[controller(expects = "signature")]
+    impl WrongFloor {
+        routes! { "" => idx() }
+        async fn idx(&self) -> Reply {
+            reply!()
+        }
+    }
+
+    struct HooklessCredential;
+    #[controller(expects = "credential")]
+    impl HooklessCredential {
+        routes! { "" => idx() }
+        async fn idx(&self) -> Reply {
+            reply!()
+        }
+    }
+
+    #[test]
+    fn family_coverage_flags_omission_wrong_floor_and_hookless_credential() {
+        let router = RouterBuilder::new()
+            .add_route("api/nofloor", Arc::new(NoFloor))
+            .add_route("api/wrong", Arc::new(WrongFloor))
+            .add_route("api/hookless", Arc::new(HooklessCredential))
+            // Outside the family → unconstrained, must NOT be flagged even
+            // though it declares nothing.
+            .add_route("health", Arc::new(NoFloor))
+            .build();
+        let err = family_coverage(&router).expect_err("three violations must fail the check");
+        assert!(
+            err.contains("NoFloor") && err.contains("api/nofloor"),
+            "names the silent controller: {err}"
+        );
+        assert!(
+            err.contains("\"signature\"") && err.contains("api/wrong"),
+            "names the unaccepted floor: {err}"
+        );
+        assert!(
+            err.contains("no `prepare` hook") && err.contains("api/hookless"),
+            "names the hookless credential floor: {err}"
+        );
+        assert!(
+            !err.contains("`health`"),
+            "a mount outside every family is unconstrained: {err}"
+        );
+    }
+
+    #[test]
+    fn mounts_inventory_reflects_the_attributes() {
+        // The macro → trait → inventory path end-to-end: `#[controller(...)]`
+        // declarations come back out of `Router::mounts()`, and the
+        // undeclared controller is a row (with `None`s), not a skip.
+        let router = RouterBuilder::new()
+            .add_route("api/hookless", Arc::new(HooklessCredential))
+            .add_route("api/nofloor", Arc::new(NoFloor))
+            .build();
+        let rows = router.mounts();
+        assert_eq!(rows.len(), 2, "one row per mounted controller");
+        assert_eq!(rows[0].controller, "HooklessCredential");
+        assert_eq!(rows[0].expects, Some("credential"));
+        assert_eq!(rows[0].prepare, None);
+        assert_eq!(rows[1].controller, "NoFloor");
+        assert_eq!(rows[1].expects, None);
+    }
+
+    #[tokio::test]
+    async fn me_controller_declares_its_hook_and_floor() {
+        // `prepare = Self::auth` surfaces as `actus_prepare()` — presence is
+        // the payload; the string is the written path, for route dumps.
+        let router = init(Storage::new()).await.expect("init");
+        let me = router
+            .mounts()
+            .into_iter()
+            .find(|m| m.mount == "api/me")
+            .expect("api/me is mounted");
+        assert_eq!(me.expects, Some("credential"));
+        assert_eq!(me.prepare, Some("Self::auth"));
+        assert_eq!(me.rate_limit_class, Some("auth"));
     }
 }
