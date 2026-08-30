@@ -128,6 +128,106 @@
 //!   route tree and emits a spec.
 //! - **Middleware** — `before` / `after` hooks via `Server::with_middleware`;
 //!   ships a `RequestLogger`.
+//! - **Route families** — `#[controller(expects = "…")]` declares a
+//!   controller's caller *floor*; `Router::mounts()` inventories every mount
+//!   (absences included) for a boot-time coverage check; `Server::router()`
+//!   lets a middleware gate on the declaration; and a `families { … }` block
+//!   in `app_routes!` makes a missing or unaccepted declaration a **compile
+//!   error** — see below.
+//!
+//! # Route families at compile time
+//!
+//! Coverage, not authorization: the label is opaque to Actus. With a
+//! `families` block, every controller mounted under a listed prefix must carry
+//! `#[controller(expects = "…")]`, and — when the entry names accepted floors —
+//! the declared floor must be one of them. This compiles:
+//!
+//! ```no_run
+//! use actus::prelude::*;
+//!
+//! struct Things;
+//! #[controller(expects = "credential")]
+//! impl Things {
+//!     routes! { GET "" => list() }
+//!     async fn list(&self) -> Reply { reply!() }
+//! }
+//!
+//! struct Health;
+//! #[controller]                 // declares nothing — fine outside every family
+//! impl Health {
+//!     routes! { GET "" => ok() }
+//!     async fn ok(&self) -> Reply { reply!() }
+//! }
+//!
+//! app_routes! {
+//!     families { "api" => ["credential", "anonymous"] }
+//!     routes {
+//!         "api/things" => Things,
+//!         "health"     => Health,
+//!     }
+//! }
+//! ```
+//!
+//! A controller that declares **nothing** under a covered prefix does not
+//! compile — the error names the controller and says what to add:
+//!
+//! ```compile_fail,E0277
+//! use actus::prelude::*;
+//!
+//! struct Things;
+//! #[controller]                 // forgot `expects = …`
+//! impl Things {
+//!     routes! { GET "" => list() }
+//!     async fn list(&self) -> Reply { reply!() }
+//! }
+//!
+//! app_routes! {
+//!     families { "api" }
+//!     routes { "api/things" => Things }
+//! }
+//! ```
+//!
+//! A floor the family does **not accept** fails the `const` membership check
+//! when `init` is compiled — i.e. whenever it is reachable from something
+//! that runs, which in an application it always is:
+//!
+//! ```compile_fail,E0080
+//! use actus::prelude::*;
+//!
+//! struct Hooks;
+//! #[controller(expects = "signature")]
+//! impl Hooks {
+//!     routes! { POST "" => receive() }
+//!     async fn receive(&self) -> Reply { reply!() }
+//! }
+//!
+//! app_routes! {
+//!     families { "api" => ["credential", "anonymous"] }   // "signature" is not accepted here
+//!     routes { "api/hooks" => Hooks }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() { let _ = init().await; }
+//! ```
+//!
+//! And a family that covers **no mount** is a compile error at its literal —
+//! a typo there would otherwise constrain nothing:
+//!
+//! ```compile_fail
+//! use actus::prelude::*;
+//!
+//! struct Things;
+//! #[controller(expects = "credential")]
+//! impl Things {
+//!     routes! { GET "" => list() }
+//!     async fn list(&self) -> Reply { reply!() }
+//! }
+//!
+//! app_routes! {
+//!     families { "apo" }        // typo: nothing is mounted under `apo/`
+//!     routes { "api/things" => Things }
+//! }
+//! ```
 //!
 //! See the [`prelude`] for the common imports, and the [repository] for the
 //! full guide — philosophy, framework comparisons, and the `examples/`

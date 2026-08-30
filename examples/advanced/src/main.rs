@@ -46,7 +46,8 @@
 //!   `match_controller` and refuses un-credentialed callers on
 //!   `"credential"` mounts before the handler runs. `HealthController`
 //!   declares nothing and is mounted outside every family — unconstrained
-//!   by construction.
+//!   by construction. The `families { "api" => [...] }` block on `app_routes!`
+//!   moves the presence check (and the accepted-floor check) to compile time.
 //!
 //! The integration tests in `tests/integration.rs` exercise the daemon-guard
 //! pattern: spawn this binary as a subprocess, run real HTTP requests, let
@@ -733,6 +734,15 @@ impl TasksController {
 // ============================================================================
 
 app_routes! {
+    // Route families, compile-time half: every controller mounted under `api/`
+    // must declare `expects`, and the declared floor must be one the family
+    // accepts. A controller that declares nothing fails to COMPILE here (the
+    // `families` block requires the `DeclaresExpectation` marker the
+    // `#[controller(expects = …)]` attribute emits); a wrong floor fails the
+    // `const` membership check when `init` is compiled. `health` is outside
+    // every family — unconstrained, as before. `family_coverage` in `main()`
+    // keeps the boot-time backstop (it also checks the hook rule).
+    families { "api" => ["credential", "anonymous"] }
     deps(store: Storage) {}
     routes {
         "health"    => HealthController,

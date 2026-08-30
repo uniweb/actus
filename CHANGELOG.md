@@ -10,6 +10,24 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **Route families, Phase 2 — the compile-time half.** `app_routes!` accepts a
+  `families { "api" => ["credential", "anonymous"], "hooks" => ["signature"],
+  "admin" }` block: every controller mounted under a listed prefix must carry
+  `#[controller(expects = "…")]` or the crate does not compile (an `E0277`
+  whose message names the controller and says what to add), and an entry with
+  an accepted list also checks the declared floor in a `const` evaluated when
+  `init` is compiled (`E0080`). Prefix matching is segment-wise and treats
+  `"api/*"` as `"api"`; a family covering no mount is a compile error at its
+  literal. New public items in `actus-controller`: the `DeclaresExpectation`
+  marker trait (emitted by `#[controller(expects = …)]`, with the
+  `on_unimplemented` diagnostic), the `Family` trait, the `const fn`s
+  `str_eq` / `floor_accepted`, and the pass-throughs `declares_expectation` /
+  `declares_expectation_in`. `expects` must now be a `const` expression (a
+  string literal or a `const` path). Doctests on the `actus` crate root pin
+  all three failure modes as `compile_fail`.
+
 ## [1.2.0]
 
 ### Added

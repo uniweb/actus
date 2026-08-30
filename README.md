@@ -506,6 +506,38 @@ fn family_coverage(router: &Router) -> Result<(), String> {
 
 Every carve-out is now a line of code somebody had to write, in one table a reviewer reads top to bottom.
 
+**Or make the omission a compile error.** A `families` block in `app_routes!` names the prefixes whose controllers must declare — and, optionally, which floors each accepts:
+
+```rust
+app_routes! {
+    families {
+        "public" => ["anonymous"],
+        "api"    => ["credential", "anonymous"],
+        "hooks"  => ["signature"],
+        "admin",                       // presence only: any declared floor
+    }
+    deps { db = Database::connect(&url).await?, }
+    routes {
+        "api/things" => ThingController { db },
+        "health"     => HealthController,   // not in a family; unconstrained
+        "*"          => SpaController,      // likewise
+    }
+}
+```
+
+For each mount under a listed prefix (segment-wise, and `"api/*"` reads as `"api"`), the macro wraps the construction in a pass-through that requires the `DeclaresExpectation` marker `#[controller(expects = …)]` emits — so a controller that declares nothing **does not compile**, and the error says what to add:
+
+```text
+error[E0277]: `SpaController` is mounted under a route family that requires a declared caller expectation
+   |
+   |     let _ = declares_expectation(SpaController);
+   |             ----------------- ^^^^^^^^^^^^^ this controller declares no `expects` label
+   |
+   = note: add `expects = "…"` to its `#[controller(...)]` attribute, or drop the prefix from the `families` block in `app_routes!`
+```
+
+An entry with an accepted list also checks the *value*, in a `const` evaluated when `init` is compiled (a floor the family rejects is an `E0080` naming the controller). A family that covers no mount is a compile error at its literal — a typo there would otherwise constrain nothing. Keep the boot-time check too: it is what carries the rules a compile cannot (a `"credential"` floor needs a hook), and it needs no reachability.
+
 **Per-request enforcement keys on the declaration, not the path.** `Server::router()` shares the route tree the server serves, so a middleware can ask the framework's own longest-prefix matcher which controller a request will reach and read its floor — no path allow-list, no re-implemented matching, and a controller mounted somewhere new is covered the moment it is mounted:
 
 ```rust
@@ -1061,7 +1093,7 @@ What's there today:
   - `Server::with_header_read_timeout(d)` — forwards to hyper's `http1::Builder::header_read_timeout`. Catches slowloris and clients that TCP-connect-and-send-nothing.
 - **`app_routes!`** with `deps` and per-route service injection (auto-clone of struct-literal shorthand, bare-ident `target: source` form, and `..base`).
 - **`#[controller]` + `routes!`** with HTTP verbs, path patterns, type-safe query/body extraction, defaults, strict/lax modes, the `prepare = ...` hook (returns `Ok(None)`, a custom early-return reply, or an error), and per-controller knobs `#[controller(max_body_bytes = …)]` / `#[controller(rate_limit = "class")]` / `#[controller(expects = "floor")]`. Actus is **policy-agnostic** — authorization lives in your application's policy layer, called from the prepare hook and/or handlers.
-- **Route families** — `#[controller(expects = "…")]` declares the least-privileged caller a controller accepts (a floor; an opaque label the framework never interprets); `Router::mounts()` returns the per-mount inventory — floor, `prepare` presence, rate-limit class, body cap, one row per mounted controller, **absences included** — for a startup coverage check that turns a silently-undeclared controller into a boot failure; `Server::router()` shares the route tree so a middleware gate can key on the declaration via the framework's own matcher. Coverage, not authorization — see [Route families](#route-families).
+- **Route families** — `#[controller(expects = "…")]` declares the least-privileged caller a controller accepts (a floor; an opaque label the framework never interprets); `Router::mounts()` returns the per-mount inventory — floor, `prepare` presence, rate-limit class, body cap, one row per mounted controller, **absences included** — for a startup coverage check that turns a silently-undeclared controller into a boot failure; `Server::router()` shares the route tree so a middleware gate can key on the declaration via the framework's own matcher; and a `families { "api" => ["credential", "anonymous"] }` block in `app_routes!` makes a missing or unaccepted declaration a **compile error**. Coverage, not authorization — see [Route families](#route-families).
 - **Per-request state carry**: `prepare` hooks stash typed values via `params.insert::<T>(value)`; handlers read them by declaring `params: &Params` and calling `params.get::<T>()`.
 - **Longest-prefix routing** at arbitrary depth, with multi-segment patterns inside controllers and a trailing `{...rest}` catch-all path parameter.
 - **Query as a multimap** — repeated keys accumulate; `Vec<String>` params get all values; `params.query()` for "catch the rest". Form-urlencoded bodies fold into the same map.
@@ -1092,7 +1124,7 @@ Actus is **1.0** — an API-stability commitment. Breaking changes now go throug
 - **A real consumer shipped against it.** A substantial production backend built on Actus — 27 controllers across ~13 k lines — exercises the core continuously: `app_routes!` / `routes!`, `#[controller(prepare = …)]` auth hooks, `Params`, `WebError`, `reply!`, `ReplyData`, `Outcome`, and a custom `Middleware`. The stress runbooks in `scripts/stress/` add load-shape confidence (124 k req/s on `/health`, 5 k concurrent WebSockets, no FD leak).
 - **The public API was deliberately reviewed.** Every public type, method, trait, and macro option was auditioned for naming, shape, and docs. The surface the real consumer leans on is committed to; every public item carries a `///` (enforced by `#![warn(missing_docs)]`); and the late-0.4 surface the consumer doesn't yet exercise got its own once-over before the freeze (see [`docs/1.0-freeze-audit.md`](docs/1.0-freeze-audit.md)).
 
-What's deliberately deferred is additive, not breaking: per-route body caps and timeouts (today's are per-controller and server-wide; see [`docs/proposals/per-route-body-caps.md`](docs/proposals/per-route-body-caps.md)) and streaming-body compression both slot in without a `2.0`. Route families shipped their Phase 1 — the `#[controller(expects = "…")]` floor, the `Router::mounts()` inventory, and `Server::router()` (see [Route families](#route-families)); Phase 2, a compile-time `families` block in `app_routes!`, is deferred until Phase 1 has a release cycle of real use behind it ([`docs/proposals/route-family-contracts.md`](docs/proposals/route-family-contracts.md)). See [Not built in](#not-built-in) for the by-design omissions.
+What's deliberately deferred is additive, not breaking: per-route body caps and timeouts (today's are per-controller and server-wide; see [`docs/proposals/per-route-body-caps.md`](docs/proposals/per-route-body-caps.md)) and streaming-body compression both slot in without a `2.0`. Route families shipped in full — the `#[controller(expects = "…")]` floor, the `Router::mounts()` inventory, `Server::router()`, and the compile-time `families` block in `app_routes!` (see [Route families](#route-families); design record [`docs/proposals/route-family-contracts.md`](docs/proposals/route-family-contracts.md)). See [Not built in](#not-built-in) for the by-design omissions.
 
 ## Comparison
 

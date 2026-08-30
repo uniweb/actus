@@ -696,6 +696,20 @@ fn generate_controller_impl(
         }
     });
 
+    // …and the compile-time half: the marker trait `app_routes!`'s `families`
+    // block requires of every controller under a covered prefix. Emitted ONLY
+    // when `expects` is declared — its absence is what makes an undeclared
+    // controller on a covered lane fail to compile. `expects` must therefore
+    // be a `const` expression (a string literal or a `const` path), which is
+    // also what makes the family's accepted-set check possible in a `const`.
+    let declares_expectation_impl = attrs.expects.as_ref().map(|expr| {
+        quote! {
+            impl ::actus::__internal::DeclaresExpectation for #self_ty {
+                const EXPECTS: &'static str = #expr;
+            }
+        }
+    });
+
     // `#[controller(prepare = Self::auth)]` — additionally surface the hook's
     // *presence* (and its written path, for route dumps) via `actus_prepare`,
     // so a route-family coverage check can enforce rules like "a credential
@@ -768,6 +782,8 @@ fn generate_controller_impl(
     quote! {
         // Original impl block unchanged
         #item_impl
+
+        #declares_expectation_impl
 
         // Generated Controller implementation
         #controller_impl
@@ -962,6 +978,16 @@ struct AppRoutesInput {
     inputs: Vec<InputParam>,
     deps: Vec<DepBinding>,
     routes: Vec<RouteBinding>,
+    /// `families { "api", "hooks" => ["signature"], … }` — mount prefixes whose
+    /// controllers must declare `expects`, each optionally with the floors the
+    /// family accepts. Empty when the block is absent.
+    families: Vec<FamilyDecl>,
+}
+
+struct FamilyDecl {
+    prefix: LitStr,
+    /// `None` = presence only; `Some(list)` = presence + membership.
+    accepts: Option<Vec<LitStr>>,
 }
 
 struct InputParam {
@@ -984,6 +1010,7 @@ impl Parse for AppRoutesInput {
         let mut inputs: Vec<InputParam> = Vec::new();
         let mut deps: Vec<DepBinding> = Vec::new();
         let mut routes: Option<Vec<RouteBinding>> = None;
+        let mut families: Vec<FamilyDecl> = Vec::new();
 
         while !input.is_empty() {
             let kw: Ident = input.parse()?;
@@ -1019,6 +1046,35 @@ impl Parse for AppRoutesInput {
                         }
                     }
                 }
+                "families" => {
+                    // `families { "api", "public" => ["anonymous"], … }`
+                    let content;
+                    syn::braced!(content in input);
+                    while !content.is_empty() {
+                        let prefix: LitStr = content.parse()?;
+                        let accepts = if content.peek(Token![=>]) {
+                            content.parse::<Token![=>]>()?;
+                            let list;
+                            syn::bracketed!(list in content);
+                            let floors: Punctuated<LitStr, Token![,]> =
+                                Punctuated::parse_terminated(&list)?;
+                            if floors.is_empty() {
+                                return Err(syn::Error::new(
+                                    prefix.span(),
+                                    "a family's accepted-floor list must name at least one floor \
+                                     (or omit `=> [...]` to require only that a floor be declared)",
+                                ));
+                            }
+                            Some(floors.into_iter().collect())
+                        } else {
+                            None
+                        };
+                        families.push(FamilyDecl { prefix, accepts });
+                        if !content.is_empty() {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
                 "routes" => {
                     let content;
                     syn::braced!(content in input);
@@ -1037,7 +1093,7 @@ impl Parse for AppRoutesInput {
                 other => {
                     return Err(syn::Error::new(
                         kw.span(),
-                        format!("expected 'deps' or 'routes', got '{}'", other),
+                        format!("expected 'deps', 'families' or 'routes', got '{}'", other),
                     ));
                 }
             }
@@ -1054,8 +1110,25 @@ impl Parse for AppRoutesInput {
             inputs,
             deps,
             routes,
+            families,
         })
     }
+}
+
+/// A mount path's segments, normalised the way `RouterBuilder::add_route`
+/// normalises them: surrounding slashes trimmed, a trailing `*` (the
+/// catch-all sugar) dropped — so `"api/*"` and `"api"` cover the same tree.
+fn mount_segments(path: &str) -> Vec<String> {
+    let mut segs: Vec<String> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if segs.last().is_some_and(|s| s == "*") {
+        segs.pop();
+    }
+    segs
 }
 
 /// Declares the application's URL blueprint and generates its `init()`.
@@ -1085,9 +1158,78 @@ fn generate_app_routes(parsed: AppRoutesInput) -> proc_macro2::TokenStream {
         quote! { let #name = #value; }
     });
 
-    let route_calls = parsed.routes.iter().map(|r| {
+    // Route families: which family (if any) covers each mount. Longest
+    // covering prefix wins, mirroring longest-prefix routing, so a deeper
+    // family entry can carve a subtree out of a shallower one. A family that
+    // covers no mount is a compile error at its literal — a typo there would
+    // otherwise constrain nothing, which is the failure the block exists to
+    // prevent, one level up.
+    let family_segs: Vec<Vec<String>> = parsed
+        .families
+        .iter()
+        .map(|f| mount_segments(&f.prefix.value()))
+        .collect();
+    let mut family_used = vec![false; parsed.families.len()];
+    let mut covering: Vec<Option<usize>> = Vec::with_capacity(parsed.routes.len());
+    for r in &parsed.routes {
+        let segs = mount_segments(&r.path.value());
+        let best = family_segs
+            .iter()
+            .enumerate()
+            .filter(|(_, fs)| {
+                segs.len() >= fs.len() && segs.iter().zip(fs.iter()).all(|(a, b)| a == b)
+            })
+            .max_by_key(|(_, fs)| fs.len())
+            .map(|(i, _)| i);
+        if let Some(i) = best {
+            family_used[i] = true;
+        }
+        covering.push(best);
+    }
+    for (i, f) in parsed.families.iter().enumerate() {
+        if !family_used[i] {
+            return syn::Error::new(
+                f.prefix.span(),
+                format!(
+                    "route family `{}` covers no mount in this `routes` block — a family that \
+                     constrains nothing is usually a typo; fix the prefix, or remove the entry \
+                     until its first controller is mounted",
+                    f.prefix.value()
+                ),
+            )
+            .to_compile_error();
+        }
+    }
+
+    // One zero-sized `Family` type per entry that names accepted floors, so the
+    // membership check can run in a `const` inside the generic pass-through.
+    let family_types: Vec<proc_macro2::TokenStream> = parsed
+        .families
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let accepts = f.accepts.as_ref()?;
+            let ident = quote::format_ident!("__ActusFamily{}", i);
+            Some(quote! {
+                struct #ident;
+                impl ::actus::__internal::Family for #ident {
+                    const ACCEPTS: &'static [&'static str] = &[ #(#accepts),* ];
+                }
+            })
+        })
+        .collect();
+
+    let route_calls = parsed.routes.iter().zip(covering.iter()).map(|(r, cover)| {
         let path = &r.path;
         let construction = rewrite_construction(&r.construction);
+        let construction = match cover {
+            None => construction,
+            Some(i) if parsed.families[*i].accepts.is_some() => {
+                let ident = quote::format_ident!("__ActusFamily{}", i);
+                quote! { ::actus::__internal::declares_expectation_in::<#ident, _>(#construction) }
+            }
+            Some(_) => quote! { ::actus::__internal::declares_expectation(#construction) },
+        };
         quote! {
             .add_route(#path, ::std::sync::Arc::new(#construction))
         }
@@ -1095,6 +1237,7 @@ fn generate_app_routes(parsed: AppRoutesInput) -> proc_macro2::TokenStream {
 
     quote! {
         pub async fn init(#(#init_params),*) -> ::actus::InitResult<::actus::Router> {
+            #(#family_types)*
             #(#dep_lets)*
 
             let router = ::actus::RouterBuilder::new()

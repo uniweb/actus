@@ -2,15 +2,19 @@
 
 **Owner:** Diego Macrini
 
-**Status:** PARTIAL — **Phase 1 shipped 2026-08-30**, as specified below: the `expects`
+**Status:** SHIPPED — 2026-08-30, both phases. **Phase 1** (Actus 1.2.0): the `expects`
 floor label, `Controller::actus_expects()` / `actus_prepare()`, the `#[non_exhaustive]`
-`Mount` inventory via `Router::mounts()`, and `Server::router()`; worked example in
-`examples/advanced` (`family_coverage` + `FloorGate` + tests), user docs in README
-§ "Route families". **Phase 2** (the compile-time `families` block) is **deferred pending
-a release cycle of real Phase 1 use**, per § Why now — it is design-recorded here, not
-scheduled. *(Doc history: v2, revised 2026-08-30 after an adversarial review that
-re-derived every checkable claim and verified the consumer premises; the eight questions
-v1 left open are **decided** below, and the running errors list is in
+`Mount` inventory via `Router::mounts()`, `Server::router()`. **Phase 2** (Actus 1.3.0): the
+`families` block in `app_routes!`, with the presence check as an `E0277` trait bound and
+the accepted-floor check as a `const` assertion — the refinement § Decisions #2 queued,
+probed on 1.88 first. The "wait a release cycle" advice in § Why now was overridden the
+same day by the owner (*"I don't like leaving work to-do behind"*); the cost that advice
+guarded against — designing the grammar twice — was paid by designing it once with the
+value check included. Worked example in `examples/advanced`; user docs in README § "Route
+families"; the production consumer adopted both phases. *(Doc history: v2, revised
+2026-08-30 after an adversarial review that re-derived every checkable claim and verified
+the consumer premises; the eight questions v1 left open are **decided** below, and the
+running errors list is in
 [For a reviewer](#for-a-reviewer--what-to-attack-and-what-you-can-check).)*
 **Scope:** post-1.0 API addition. Everything in both phases is **purely additive** — a
 defaulted trait method or two, one `#[non_exhaustive]` struct, a `Router` method, a `Server`
