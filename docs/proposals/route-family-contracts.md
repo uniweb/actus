@@ -7,7 +7,10 @@ shippable; Phase 1 stands alone and solves the reported problem, Phase 2 moves t
 same check from boot to compile time.
 **Scope:** post-1.0 API addition. Both phases are **purely additive** — a trait
 method with a default body, a `Router` method, a `#[controller]` attribute key, and
-an optional `app_routes!` block. Neither needs a `2.0`.
+an optional `app_routes!` block. Neither needs a `2.0`. One refinement does, and
+is queued rather than folded in: stamping the audience onto `Request`
+(§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)) — the
+reason is a finding about the 1.0 surface that outlives this proposal.
 
 ---
 
@@ -208,6 +211,13 @@ substitute, for three reasons:
 The mechanism below ties the declaration to the controller, in the file the author
 already has open, and puts the carve-outs in one reviewable `match`.
 
+⭐ **The sharper way to say it: the middleware is the right mechanism with the wrong
+key.** A gate keyed on `request.path` protects a *location*; a gate keyed on the
+controller's declaration protects a *claim*, needs no allow-list, and covers a
+controller mounted anywhere — including somewhere nobody anticipated. Keep the
+middleware; change what it reads. See
+[Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path).
+
 ## Recommended shape
 
 **Phase 1 — the label and the inventory.**
@@ -340,10 +350,123 @@ extraction in the macro and no runtime cost.
 | catches a **wrong** declaration | at boot | at boot (unchanged) |
 | new public API | 1 trait method, 1 struct, 1 `Router` method, 1 attribute key | + 1 marker trait, + 1 `app_routes!` block |
 | the check can be skipped by | not calling it | nothing |
+| enables a **runtime** gate | yes — via a boot-built map (see below) | unchanged |
 
 Phase 2 does not replace Phase 1's startup check — it only guarantees *presence*.
 Whether the declared value is the right one for the family stays a string
 comparison, and that stays at boot.
+
+## Enforcement: key the gate to the declaration, not the path
+
+A declaration is worth more than an audit if something can *act* on it per request.
+This section is what a real design question produced, and the answer generalises past
+the case that raised it.
+
+**The question.** An application with client-segregated top-level prefixes hits an
+awkwardness: a family reserved for authenticated callers must still expose the routes
+that *establish* authentication — login, registration, credential reset, an OAuth
+callback. So the family has a hole in it, and the invariant "everything under this
+prefix is authenticated" is false by design. The tempting fix is to **hoist**: move
+those routes to a top-level `auth/` family, leaving the original prefix uniform and
+gateable by a blanket path rule.
+
+**Hoisting is the wrong lever, and the reason is worth stating in general terms:** it
+restructures the URL space to buy a property that a declaration buys for free. Three
+costs, none of which the hoist can avoid:
+
+1. **It merges nothing.** The per-client login endpoints stay distinct after the move
+   (they have different transports — one sets a cookie, one is bearer-native). The
+   endpoint set is unchanged; only the segment order is. The whole cost buys a
+   re-parenting.
+2. **The hoisted surface is not uniform either.** An auth surface is *irreducibly*
+   mixed: `login` and `reset` are anonymous, but `logout`, `me`, and step-up
+   re-authentication all require an existing session. Hoisting therefore creates a
+   top-level family with **no invariant at all**, containing some of the most
+   sensitive authenticated routes in the system, under a prefix every reader parses
+   as "the anonymous lane." That inverts the problem rather than solving it.
+3. **It spends the wrong segment.** The first path segment is the one every
+   intermediary keys on — an edge rewrite, CORS, any prefix-scoped policy. If the
+   model's premise is that the top level names the audience, a hoist demotes the
+   audience to second place in favour of a function name the rest of the path already
+   carries, and gives each client two base URLs where it had one.
+
+⭐ **The general rule: the top-level segment is already spent. Anything else you want
+to segregate belongs at controller granularity, where a declaration is cheap and the
+framework can check it.** Restructuring URLs to obtain a checkable invariant is paying
+in architecture for something a label provides.
+
+### What the gate then looks like
+
+Once the audience is declared, an application `Middleware` can enforce a floor with
+**no allow-list at all**:
+
+```rust
+// The gate reads a CLAIM, not a location.
+if request_audience == Some("session") && !has_valid_session(&request) {
+    return Err(WebError::Unauthorized);
+}
+```
+
+Be fair to the alternative: a prefix gate *does* cover its own subtree
+automatically, new mounts included, and that is its real strength. Two things it
+cannot do. It cannot express an **exception** without enumerating it by path — a
+second list, maintained beside the routes, drifting from them. And it cannot follow a
+controller mounted **outside** the prefix anyone thought to cover. The
+declaration-keyed gate has neither limitation, because the claim travels with the
+controller rather than with its address: the exception is the controller declaring
+`"anonymous"` in its own file, and a controller carrying `"session"` is gated at every
+mount it ever appears at.
+
+### Reading the declaration: today, and the way it should work
+
+**Today, additively (Phase 1, no framework change beyond the label).** Build the map
+once at boot from the inventory, and look up in the middleware:
+
+```rust
+// at startup, from the declarations themselves — not hand-maintained
+let gate: HashMap<String, &'static str> = router.audiences()
+    .into_iter()
+    .filter_map(|r| r.audience.map(|a| (r.mount, a)))
+    .collect();
+```
+
+This keeps the property that matters — **the gate is derived from declarations, never
+from a hand-written path list** — at the cost of the application re-implementing
+longest-prefix matching over `request.path_parts`, which the router already does
+correctly. That duplication is a real wart: mounts nest, and a subtly different match
+is a subtly different security boundary.
+
+**The right shape: the framework stamps it.** Actus already does exactly this for the
+sibling label — `server.rs` sets `request.rate_limit_class` from the matched
+controller right after routing and before the `before` chain. An `audience` field
+alongside it would remove the duplicated matching entirely and cost one line at the
+stamp site.
+
+### ⛔ Why the stamp is queued and not in Phase 1
+
+**Adding that field is a breaking change**, verified against the code on 2026-08-30:
+
+- `Request` carries six fields, **every one `pub`**, with **no private field** and
+  **no `#[non_exhaustive]`** (`crates/actus-server/src/request.rs`).
+- Downstream code can therefore construct it with an exhaustive struct literal — and
+  *does*: Actus's own tests build one that way (`request.rs`, the `req(...)` helper),
+  which is the natural shape for a middleware unit test in any consumer.
+- Adding a public field to a struct with no private fields and no `#[non_exhaustive]`
+  is a **major** change under Cargo's SemVer rules. Marking it `#[non_exhaustive]`
+  now is equally breaking, for the same reason.
+
+⭐ **The finding is larger than this proposal, and worth recording on its own:**
+`Request` cannot receive *any* new routing-derived projection during `1.x`.
+`rate_limit_class` got in before the freeze; nothing can follow it. Every future
+"stamp the matched route's X onto the request" idea is now a `2.0` item. The 1.0
+freeze audit did not surface this, because it reviewed the *shape* of the public
+surface rather than its *extensibility*.
+
+⇒ **Recommendation: ship Phase 1 without the stamp, and put `#[non_exhaustive]` on
+`Request` plus the `audience` field on the `2.0` docket as one item.** The boot-built
+map above is a working gate in the meantime, and the day a `2.0` happens the wart
+disappears without the application changing its middleware's logic — only where it
+reads the label from.
 
 ## Second-order win: the claim becomes falsifiable
 
@@ -391,6 +514,11 @@ insists on the claim; the application supplies the probe that checks it.**
 - `pub struct MountAudience`; `Router::audiences()` walking the tree the way
   `routes()` does (children sorted, deterministic DFS), emitting a row for **every**
   node bearing a controller.
+- **Queued for `2.0`, not Phase 1** (§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)):
+  `#[non_exhaustive]` on `Request`, plus
+  `pub audience: Option<&'static str>` set from `route_match.controller.actus_audience()`
+  at the same site that already sets `rate_limit_class`. One line at the stamp site;
+  the cost is entirely in the major version it forces.
 
 ### Tests
 
@@ -407,6 +535,14 @@ insists on the claim; the application supplies the probe that checks it.**
 - `examples/advanced` grows an `audience_coverage` check next to `rate_limit_coverage`,
   wired into its existing `--check` flag, with unit tests for a violation and a pass —
   mirroring the two `rate_limit_coverage` tests already there.
+- `examples/advanced` also grows the **gate** from
+  [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path) as a
+  `Middleware` beside its rate limiter: the boot-built `mount → audience` map, a
+  longest-prefix lookup, `WebError::Unauthorized` on a `"session"` mount with no
+  credential. Without it the proposal ships a *declaration* with no worked example of
+  anything acting on one, which is how a feature gets read as documentation-only. An
+  integration test drives a real request at an `"anonymous"` mount and a `"session"`
+  mount and asserts the two outcomes.
 
 ### Docs
 
@@ -428,8 +564,11 @@ insists on the claim; the application supplies the probe that checks it.**
   and `rate_limit`. A route needing a different audience gets its own controller —
   the same answer the body-cap proposal gives, and for the same reason. A per-route
   override would be additive later, if a real consumer hits it.
-- **Enforce anything per request.** `audiences()` is one tree walk at startup and
-  the Phase 2 bound is compile-time. Neither touches the request path.
+- **Enforce anything itself.** Actus supplies the declaration and — once a `2.0`
+  allows the stamp — makes it readable per request. The gate that *acts* on it is
+  application `Middleware`, and what "a valid session" means stays entirely the
+  application's. `audiences()` is one tree walk at startup and the Phase 2 bound is
+  compile-time; neither adds per-request work of its own.
 - **Guess an audience from the mount.** A controller under `public/` that forgot its
   label is precisely the case being caught; inferring `"anonymous"` for it would
   invert the feature.
@@ -482,8 +621,28 @@ insists on the claim; the application supplies the probe that checks it.**
    per-mount override in `app_routes!` warranted? I think the set is sufficient and the
    override is speculative.
 
-7. **Should `audience` be required when `families` is used but the controller is
-   generic over its mount?** Related to #6; probably falls out of the set answer.
+7. **The genuinely mixed controller — is "split it" a good enough answer?** This is
+   the case that will come up first in any real application, and the label is
+   per-controller. An auth controller is the archetype: `login`, `register` and
+   `reset` are anonymous while `logout`, `me` and step-up re-authentication require an
+   existing session, so no single label is honest for the whole thing. Three answers:
+   **(a)** split it into an anonymous controller and an authenticated sibling — the
+   same answer the body-cap proposal gives, it costs only a second mount, and it
+   yields two controllers that each carry a *strong* claim; **(b)** allow a
+   deliberately weak label (`"mixed"`) that the family rule accepts, honest but
+   nearly contentless; **(c)** per-route audiences, which is real scope. I lean (a)
+   and think it should be stated as the recommended shape in the README, because the
+   alternative is every consumer independently discovering that their auth controller
+   does not fit.
+
+8. **Do the stamp and `#[non_exhaustive]` go on the `2.0` docket as one item?** The
+   [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path) finding
+   says `Request` can take no new framework-populated field during `1.x`. If that is
+   accepted, the `2.0` list starts here and this is its first entry — and it is worth
+   asking whether an additive escape exists that this review missed (a typed
+   extensions slot on `Request` mirroring `Params::insert`/`get` would itself be a new
+   field, so it does not escape; nor does a private field, which breaks the same
+   literals).
 
 ## Estimated effort
 
@@ -493,6 +652,10 @@ insists on the claim; the application supplies the probe that checks it.**
 - tests (~60)
 - `examples/advanced` coverage check + its two tests (~50)
 - README + rustdoc (prose)
+
+**Queued for `2.0`** — trivial in code, expensive in version: `#[non_exhaustive]` on
+`Request` + the `audience` field + one line at the stamp site (~10), plus updating
+every `Request` literal in the workspace's own tests (~6 sites).
 
 **Phase 2** — roughly 200–300 lines on top:
 - `families` parsing in `AppRoutesInput` + prefix matching + construction wrapping (~90)
@@ -519,6 +682,13 @@ The argument for waiting is Phase 2's grammar: `families` is a permanent additio
 the one macro that is meant to be the whole audit surface, and it should not be
 designed twice. Phase 1 buys the information needed to design it well — including
 whether the string label survives contact with a second consumer.
+
+⚠️ **One thing found while writing this does not wait for either phase.** `Request`
+is a plain all-public struct, so it can take no new framework-populated field before a
+`2.0` (§ [Enforcement](#enforcement-key-the-gate-to-the-declaration-not-the-path)).
+That constraint exists whether or not this proposal is ever built, it applies to every
+future "stamp the matched route's X onto the request" idea, and it is cheaper to
+record now than to rediscover from a failed `cargo semver-checks` later.
 
 ⇒ **Suggested order: ship Phase 1, use it in the production consumer for a release
 cycle, then decide Phase 2 on evidence.** That is the same discipline the body-cap
