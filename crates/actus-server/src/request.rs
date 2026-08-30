@@ -157,6 +157,13 @@ impl Request {
     /// still empty) the caller passed in, so the error response still
     /// has the request headers etc. and flows through the after-chain
     /// like every other reply.
+    //
+    // `result_large_err`: the `Err` carries the whole `Request` skeleton back
+    // on purpose (see above) — that is the feature, not an accident of size.
+    // Boxing it would change a `pub` signature on a 1.x crate, so the lint is
+    // silenced here rather than "fixed". The lint became default-warn in a
+    // clippy newer than the one this was written against; CI runs stable.
+    #[allow(clippy::result_large_err)]
     pub async fn collect_body(
         mut self,
         body: hyper::body::Incoming,
@@ -188,6 +195,9 @@ impl Request {
     /// `Request` skeleton is populated with method / path / query /
     /// headers — only `body` is empty — so the caller can route the
     /// error through the normal reply pipeline.
+    //
+    // Same deliberate large `Err` as `collect_body`, same reason to keep it.
+    #[allow(clippy::result_large_err)]
     pub async fn from_hyper(
         req: hyper::Request<hyper::body::Incoming>,
         max_body_bytes: usize,
