@@ -19,12 +19,12 @@ This rule matters more in Actus than in most codebases. The framework's shape is
 Five crates plus two examples:
 
 - `crates/actus-reply/` — `Reply`, `ReplyData`, `WebError`, the `reply!` macro, and the `Finalizer` (`ReplyData` → `hyper` `Response`).
-- `crates/actus-controller/` — `Controller` trait, `Params`, `Verb`, `RouteDef`, the `routing::{match_pattern, resolve}` functions. The runtime side of controllers.
+- `crates/actus-controller/` — `Controller` trait, `Params`, `Verb`, `RouteDef`, the `routing::{match_pattern, resolve}` functions, and the route-family compile-time half (`DeclaresExpectation`, `Family`, `declares_expectation[_in]`). The runtime side of controllers.
 - `crates/actus-controller/macros/` — `#[controller]`, `routes!`, `app_routes!` proc-macros.
-- `crates/actus-server/` — hyper-based `Server`, longest-prefix `Router` (and `RateLimitClass`), `Request`, `Middleware`, `CorsLayer`; `CompressionLayer` (behind `compression`); `websocket::{upgrade, WebSocket, Message}` (behind `websocket`); `openapi::{generate, Options}` (behind `openapi`).
+- `crates/actus-server/` — hyper-based `Server` (with `router()`), longest-prefix `Router` (`mounts()` — the per-mount inventory, absences included — and `RateLimitClass`), `Request`, `Middleware`, `CorsLayer`; `CompressionLayer` (behind `compression`); `websocket::{upgrade, WebSocket, Message}` (behind `websocket`); `openapi::{generate, Options}` (behind `openapi`).
 - `crates/actus/` — facade crate; re-exports the prelude for end users.
 - `examples/basic/` — wires services + `app_routes!` + JSON body + header auth + verb restrictions + `{...path}` rest param + CORS + compression + WebSocket echo + SSE + OpenAPI + a maintenance-mode middleware, all served over real HTTP. Always keep this compiling.
-- `examples/advanced/` — the application-side patterns in working code: a domain-error → `WebError` mapping, `ProblemDetails` with `field`/`rule`, a class-based rate-limit `Middleware` with a startup coverage check (`--check`), per-controller `max_body_bytes`, and the daemon-guard integration tests (`tests/integration.rs`). Also keep compiling.
+- `examples/advanced/` — the application-side patterns in working code: a domain-error → `WebError` mapping, `ProblemDetails` with `field`/`rule`, a class-based rate-limit `Middleware` with a startup coverage check (`--check`), per-controller `max_body_bytes`, **route families** (`#[controller(expects = …)]` floors, the `families { … }` block on `app_routes!`, `family_coverage` at boot, a declaration-keyed `FloorGate` middleware via `server.router()`), and the daemon-guard integration tests (`tests/integration.rs`). Also keep compiling.
 
 ## Feature flags
 
