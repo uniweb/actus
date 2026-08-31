@@ -46,7 +46,7 @@ cargo clippy --all-targets --features actus/compression,actus/websocket,actus/op
 ## Testing patterns
 
 - **Unit tests** live alongside the code (`#[cfg(test)] mod tests` at the bottom of the file). Match the style of the existing tests in the same file.
-- **Integration tests** live in `crates/actus-server/tests/`. The pattern: bind `127.0.0.1:0` with `std::net::TcpListener`, take the port, drop the listener, then `Server::run_with_shutdown_on(addr, shutdown_future)` on the freed port; poll `tokio::net::TcpStream::connect` until it succeeds before sending the test request. See `tests/websocket.rs` and `tests/middleware.rs` for the shape.
+- **Integration tests** live in `crates/actus-server/tests/`. The pattern: bind `127.0.0.1:0` with `tokio::net::TcpListener`, read `local_addr()`, and hand the listener to `Server::run_with_shutdown_listener(listener, shutdown_future)` — the server is already listening when it returns, so there is nothing to poll for. ⛔ **Never bind, read the port, drop, and re-bind with `run_with_shutdown_on`**: tests in one binary run in parallel, each spawning a server, and on CI another test re-bound the freed port in that gap (`AddrInUse`, then the request reached a stranger's server — 2026-08-31). See `tests/middleware.rs` for the shape.
 - For HTTP requests in tests, prefer **raw `tokio::net::TcpStream` + HTTP/1.1 with `Connection: close`** and a small response parser — keeps test dependencies at zero. WebSocket tests use `tokio-tungstenite` (which is already there via the `websocket` feature).
 - Tests must be deterministic. Don't add tests that race or rely on wall-clock timeouts beyond a small drain ceiling.
 

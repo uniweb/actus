@@ -160,33 +160,32 @@ app_routes! {
 }
 
 /// Start a server configured by `f` on an ephemeral 127.0.0.1 port; return
-/// `(addr, shutdown_tx)`. Polls until the port is listening before returning.
+/// `(addr, shutdown_tx)`.
+///
+/// The listener is bound HERE and handed to the server — never bound, read
+/// and dropped for the server to re-bind. That bind-then-drop shape is a
+/// race: every test in this binary spawns its own server in parallel, and on
+/// CI (2026-08-31, run 33343857317) another test re-bound the freed port in
+/// the gap, so this server got `AddrInUse` and the test's request reached a
+/// stranger's middleware stack. Keeping the listener is what
+/// `run_with_shutdown_listener` exists for (1.1.0). It is already listening
+/// when this returns, so there is nothing to poll for.
 async fn spawn<F>(f: F) -> (SocketAddr, oneshot::Sender<()>)
 where
     F: FnOnce(Server) -> Server + Send + 'static,
 {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         let server = f(Server::new(init().await.unwrap()));
         server
-            .run_with_shutdown_on(addr, async move {
+            .run_with_shutdown_listener(listener, async move {
                 let _ = rx.await;
             })
             .await
             .unwrap();
     });
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
     (addr, tx)
 }
 
@@ -514,31 +513,21 @@ async fn drain_deadline_is_honored_on_shutdown() {
     use std::time::Instant;
     use tokio::sync::oneshot;
 
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    // Bind here and hand the listener over (see `spawn` above for why the
+    // bind-then-drop shape is a race); already listening, nothing to poll.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
         Server::new(init().await.unwrap())
             .with_drain_deadline(Duration::from_millis(200))
-            .run_with_shutdown_on(addr, async move {
+            .run_with_shutdown_listener(listener, async move {
                 let _ = stop_rx.await;
             })
             .await
             .unwrap();
     });
-
-    // Wait for the server to bind.
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 
     // Open a slow request and keep the TCP read pending. The handler will
     // sleep 60 s; we just need hyper to have routed to it before we
