@@ -996,9 +996,11 @@ pub fn declares_expectation<T: Controller + DeclaresExpectation>(c: T) -> T {
 /// `const` assertion evaluated when this instantiation is compiled — i.e. when
 /// the generated `init()` is reachable from something that runs, which in an
 /// application it always is. A failure reads as an `E0080` naming the
-/// controller type in its "while instantiating" note. (The boot-time coverage
-/// check over `Router::mounts()` remains the backstop that needs no
-/// reachability.)
+/// controller type in its "while instantiating" note. ⚠️ Evaluation needs
+/// codegen: `cargo check` (and IDE diagnostics built on it) does not run it;
+/// `cargo build`, `cargo test` and CI do — only the presence bound is a type
+/// error visible under `check`. (The boot-time coverage check over
+/// `Router::mounts()` remains the backstop that needs no reachability.)
 #[inline(always)]
 pub fn declares_expectation_in<F: Family, T: Controller + DeclaresExpectation>(c: T) -> T {
     const {

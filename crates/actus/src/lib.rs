@@ -189,7 +189,10 @@
 //!
 //! A floor the family does **not accept** fails the `const` membership check
 //! when `init` is compiled — i.e. whenever it is reachable from something
-//! that runs, which in an application it always is:
+//! that runs, which in an application it always is. ⚠️ "Compiled" means
+//! codegen: `cargo check` (and IDE diagnostics built on it) does not evaluate
+//! it; `cargo build`, `cargo test` and CI do. The presence check above is a
+//! type error and shows under `check`.
 //!
 //! ```compile_fail,E0080
 //! use actus::prelude::*;
