@@ -82,7 +82,7 @@ the framework already built — which is why, in practice, nobody does.
 
 In the production consumer (measured 2026-08-30): roughly fifty mounted
 controllers; about three-quarters share one permissive `prepare` hook; around a
-dozen deliberately declare nothing — the anonymous content lanes, the SPA shell,
+dozen deliberately declare nothing — the anonymous content families, the SPA shell,
 the signature-authed webhook receiver, a few dev-only surfaces with their own
 guard. Establishing that took grepping every controller module and hand-joining
 the result against a mount table two hundred lines long in a different file.
@@ -275,7 +275,7 @@ substitute, for three reasons:
 
 1. **The carve-outs move the bug rather than fixing it.** Every family has them —
    the login routes that must be anonymous inside an authenticated family; the
-   unauthenticated discovery route on a client lane. Encoding those in a middleware
+   unauthenticated discovery route on a client-class prefix. Encoding those in a middleware
    means a path allow-list: a second out-of-band list, maintained by hand, drifting
    from the routes exactly the way the prose invariant does today. The failure mode
    is preserved and relocated. *(Not hypothetical: the production consumer already
@@ -490,7 +490,7 @@ A declaration is worth more than an audit if something can *act* on it per reque
 still expose the routes that *establish* authentication — login, registration, an
 OAuth callback — so the family has deliberate holes, and the tempting fix is to
 **hoist** those routes into their own top-level family. Hoisting is the wrong
-lever: it re-parents endpoints without merging them, it creates a top-level lane
+lever: it re-parents endpoints without merging them, it creates a top-level family
 with *no* invariant at all (an auth surface is irreducibly mixed — see
 [The mixed controller](#the-mixed-controller-the-label-is-the-floor)), and it
 spends the top-level path segment — the one thing every prefix-scoped intermediary

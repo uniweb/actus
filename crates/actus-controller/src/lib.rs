@@ -927,7 +927,7 @@ pub trait Controller: Send + Sync {
 /// `expects = "…"`; **absent on a controller that declares nothing**, which is
 /// the whole point. The `families { … }` block in `app_routes!` requires this
 /// trait of every controller mounted under a listed prefix, so a silently
-/// undeclared controller on a covered lane is a **compile error** — the
+/// undeclared controller under a covered prefix is a **compile error** — the
 /// `on_unimplemented` message below is the one the developer reads.
 ///
 /// `EXPECTS` is the same label [`Controller::actus_expects`] returns at runtime,

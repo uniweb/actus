@@ -699,7 +699,7 @@ fn generate_controller_impl(
     // …and the compile-time half: the marker trait `app_routes!`'s `families`
     // block requires of every controller under a covered prefix. Emitted ONLY
     // when `expects` is declared — its absence is what makes an undeclared
-    // controller on a covered lane fail to compile. `expects` must therefore
+    // controller under a covered prefix fail to compile. `expects` must therefore
     // be a `const` expression (a string literal or a `const` path), which is
     // also what makes the family's accepted-set check possible in a `const`.
     let declares_expectation_impl = attrs.expects.as_ref().map(|expr| {

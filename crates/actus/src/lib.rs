@@ -212,15 +212,17 @@
 //!
 //! Families **nest, longest prefix winning** — the same rule as routing — so an
 //! exception can be confined to the one subtree that earns it, without moving a
-//! URL. Here `dev/auth` may declare `"session-entry"` and nothing else under
-//! `dev/` may; this doctest *runs* `init`, so the `const` check is evaluated:
+//! URL. Here `api/auth` — the controller that issues sessions, whose callers
+//! by definition have none yet — may declare `"session-entry"`, and nothing
+//! else under `api/` may; this doctest *runs* `init`, so the `const` check is
+//! evaluated:
 //!
 //! ```
 //! use actus::prelude::*;
 //!
-//! struct Registry;
+//! struct Things;
 //! #[controller(expects = "credential")]
-//! impl Registry {
+//! impl Things {
 //!     routes! { GET "" => list() }
 //!     async fn list(&self) -> Reply { reply!() }
 //! }
@@ -234,12 +236,12 @@
 //!
 //! app_routes! {
 //!     families {
-//!         "dev"      => ["credential"],
-//!         "dev/auth" => ["session-entry"],   // the deeper entry wins for its subtree
+//!         "api"      => ["credential"],
+//!         "api/auth" => ["session-entry"],   // the deeper entry wins for its subtree
 //!     }
 //!     routes {
-//!         "dev/registry" => Registry,
-//!         "dev/auth"     => Login,
+//!         "api/things" => Things,
+//!         "api/auth"   => Login,
 //!     }
 //! }
 //!
@@ -250,7 +252,7 @@
 //! }
 //! ```
 //!
-//! That nesting is the intended answer when a lane needs an exception: name the
+//! That nesting is the intended answer when a family needs an exception: name the
 //! reason as its own floor, confine it to the subtree that earns it, and leave
 //! the URLs alone — the top-level segment is what every client and intermediary
 //! keys on, and moving routes to make a family uniform spends shipped URLs on a
