@@ -21,50 +21,60 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 struct Daemon {
     child: Option<Child>,
     addr: SocketAddr,
+    /// The daemon's stdout pipe, held open for its lifetime: it wrote one
+    /// line (the announcement) and will write nothing more, but dropping the
+    /// read end would turn any later write into a SIGPIPE.
+    _stdout: std::process::ChildStdout,
 }
 
 impl Daemon {
     async fn spawn() -> Self {
-        // bind 127.0.0.1:0 → take the OS-assigned port → drop the listener
-        // so the daemon can rebind. Tiny TOCTOU window where another process
-        // could grab the port; in practice never fires on a dev box, and
-        // the daemon errors loudly on bind if it does.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind ephemeral")
-            .local_addr()
-            .expect("local_addr")
-            .port();
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-
+        // `--port 0`: the daemon binds an ephemeral port ITSELF and announces
+        // the address on stdout. Not bind-read-drop-rebind from here: that is
+        // a race, and not a loud one — with tests in parallel, another test's
+        // daemon can take the freed port in the gap, and since every daemon is
+        // the same binary the request lands on a stranger's server that
+        // answers plausibly. (The in-process tests hit exactly that on CI,
+        // 2026-08-31.) The announcement is also the readiness signal, so there
+        // is nothing to poll.
         let mut child = Command::new(env!("CARGO_BIN_EXE_actus-advanced-example"))
-            .args(["--port", &port.to_string()])
-            // Silence the daemon's own tracing output so the test runner's
-            // log noise stays manageable. (Each daemon emits ~3 lines per
-            // request; the rate-limit test makes 40+ requests.)
-            .env("RUST_LOG", "warn")
-            .stdout(std::process::Stdio::null())
+            .args(["--port", "0"])
+            // The daemon logs to stderr; keep the runner's output quiet.
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn daemon");
+        let stdout = child.stdout.take().expect("piped stdout");
 
-        // Poll the port until it accepts a connection (or give up). The
-        // daemon prints a tracing line when it binds; we don't have to
-        // scrape that — the TCP connect is the cheap, reliable signal.
-        for _ in 0..200 {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return Self {
-                    child: Some(child),
-                    addr,
-                };
+        // Read the first line on a blocking thread (std pipe), with a deadline.
+        let announced = tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            let read = reader.read_line(&mut line);
+            (read.map(|_| line), reader.into_inner())
+        });
+        let (line, stdout) = match tokio::time::timeout(Duration::from_secs(15), announced).await {
+            Ok(Ok((Ok(line), stdout))) if !line.trim().is_empty() => (line, stdout),
+            other => {
+                // Never announced. Reap before panicking — `Child::drop` is a
+                // no-op by design, so it would otherwise leak as a zombie.
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("daemon never announced its address: {other:?}");
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        let addr: SocketAddr = line
+            .trim()
+            .strip_prefix("listening on http://")
+            .unwrap_or_else(|| panic!("unexpected announcement line: {line:?}"))
+            .parse()
+            .expect("announced address parses");
+        Self {
+            child: Some(child),
+            addr,
+            _stdout: stdout,
         }
-        // Daemon never came up. Reap it before panicking — otherwise it'd
-        // leak as a zombie, since `std::process::Child::drop` is a no-op
-        // by design.
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("daemon never started listening on {addr}");
     }
 
     /// Send an HTTP/1.1 request and parse the response into

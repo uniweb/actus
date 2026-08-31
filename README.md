@@ -904,17 +904,21 @@ The same shape works for tagged enums (`#[serde(tag = "kind")]`) — let serde d
 For end-to-end tests through the real HTTP stack, spawn your binary as a subprocess on an ephemeral port. A small RAII guard cleans up so a panicking test doesn't leak a server:
 
 ```rust
-pub struct Daemon { child: Child, port: u16, client: reqwest::Client }
+pub struct Daemon { child: Child, addr: SocketAddr, client: reqwest::Client }
 
 impl Daemon {
     pub async fn spawn() -> Self {
-        // bind 127.0.0.1:0 → take the OS-assigned port → drop the listener
-        let port = pick_ephemeral_port();
-        let child = Command::new(env!("CARGO_BIN_EXE_yourbin"))
-            .args(["serve", "--port", &port.to_string()])
+        // `--port 0`: the daemon binds an ephemeral port ITSELF and announces
+        // the address on its stdout — no bind-and-drop, so no window in which
+        // another test's daemon can take the port.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_yourbin"))
+            .args(["serve", "--port", "0"])
+            .stdout(Stdio::piped())
             .spawn().expect("spawn");
-        wait_until_live(port).await;     // poll /health/live with a deadline
-        Self { child, port, client: reqwest::Client::new() }
+        // First stdout line: `listening on http://127.0.0.1:PORT` — also the
+        // readiness signal, so there is nothing to poll.
+        let addr = read_announced_addr(&mut child).await;
+        Self { child, addr, client: reqwest::Client::new() }
     }
 }
 
@@ -928,7 +932,7 @@ impl Drop for Daemon {
 
 Tests boot a fresh `Daemon`, set up fixture data via direct library calls (faster than the HTTP API and scoped to one transaction), make real requests with `reqwest`, and let `Drop` reap the child. The whole pipeline — routing, auth, services, error mapping, the `Finalizer` — is exercised in the same shape it runs in production.
 
-The ephemeral-port-via-bind-and-drop trick has a tiny TOCTOU window where another process could grab the port between the drop and the daemon's bind; in practice it never fires on a dev box. If it ever does, the daemon errors loudly on bind — not a silent flake.
+On the daemon side, bind the listener yourself and print `local_addr()` before serving it with `Server::run_listener` (logs on stderr, so stdout carries only that line). **Do not** bind `127.0.0.1:0`, read the port, drop the listener and let the daemon re-bind: with tests running in parallel, another test's daemon can take the freed port in that gap — and because every daemon is the same binary, the request then lands on a *stranger's* server that answers plausibly. That is a silent flake, not a loud one; the in-process shape of it hit this repo's CI on 2026-08-31. The same rule for in-process tests: `run_with_shutdown_listener` takes the listener you already hold.
 
 ### Rate-limiting
 

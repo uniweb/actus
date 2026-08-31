@@ -757,14 +757,19 @@ app_routes! {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Logs on stderr, so stdout carries exactly one protocol line — the bound
+    // address, below — that a test harness can read without parsing log noise.
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stderr)
         .init();
 
-    // `--port N` lets the integration tests spawn this binary on an
-    // ephemeral port via the daemon-guard pattern (see `tests/`). `--check`
-    // runs the rate-limit coverage check and exits (a CI gate — validate the
-    // config without binding a port).
+    // `--port N` binds that port; `--port 0` binds an ephemeral one, and the
+    // address actually bound is printed on stdout as `listening on http://…`.
+    // That is how the integration tests find the daemon (see `tests/`) — the
+    // daemon owns the bind, so there is no bind-read-drop-rebind window for
+    // another test's daemon to take the port in. `--check` runs the coverage
+    // checks and exits (a CI gate — validate the config without binding).
     let mut port: u16 = 3001;
     let mut check_only = false;
     let mut args = std::env::args().skip(1);
@@ -817,13 +822,18 @@ async fn main() -> anyhow::Result<()> {
     let floor_gate = FloorGate {
         router: server.router(),
     };
+    // Bind here rather than `run(port)`: with `--port 0` the OS picks, and the
+    // announcement below is both the address and the readiness signal —
+    // `run_listener` serves a listener that is already listening.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    println!("listening on http://{}", listener.local_addr()?);
     server
         .with_middleware(RequestLogger)
         .with_middleware(limiter)
         .with_middleware(floor_gate)
         .with_cors(CorsLayer::permissive())
         .with_request_timeout(Duration::from_secs(10))
-        .run(port)
+        .run_listener(listener)
         .await?;
     Ok(())
 }
