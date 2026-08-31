@@ -8,7 +8,11 @@
 //! and self-contained controllers — while letting you mix REST, RPC-style
 //! actions, and legacy URL migrations in the same codebase. A reviewer can
 //! answer *what endpoints exist, what they require, and who can call them* by
-//! reading two macros, without grepping for attribute decorators across files.
+//! reading two macros, without grepping for attribute decorators across files
+//! — and the third answer is a declaration the build checks: each controller
+//! states the least-privileged caller it accepts, and a `families` block in
+//! `app_routes!` refuses to compile a controller that states nothing or claims
+//! a floor its prefix does not accept.
 //!
 //! # Philosophy
 //!

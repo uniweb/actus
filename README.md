@@ -16,7 +16,7 @@ Most Rust web frameworks are either unopinionated (you invent structure) or rigi
 2. **A clear unit of code.** Each controller owns a URL prefix and declares its routes, access levels, and parameters in a single `routes! { ... }` block. The API surface for that prefix is auditable in one place.
 3. **Pragmatism inside that structure.** Within a controller, you can use REST verbs (`GET`/`POST`/`PUT`/`DELETE`), RPC-style action names, path parameters (`{id}`), or migrate legacy URLs (`login.php`) — whatever the situation calls for.
 
-The result is a framework where reviewers can answer "what endpoints exist, what they require, and who can call them" by reading two macros — without grepping for attribute decorators across many files.
+The result is a framework where reviewers can answer "what endpoints exist, what they require, and who can call them" by reading two macros — without grepping for attribute decorators across many files. The third answer is not inferred from hooks: each controller *declares* the least-privileged caller it accepts, and a `families` block in `app_routes!` makes a controller that declares nothing — or claims a floor its prefix does not accept — a compile error. Intent is written where the reviewer is already reading, and the build holds the code to it.
 
 ## Design principles
 
