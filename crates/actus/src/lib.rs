@@ -256,6 +256,11 @@
 //! async fn main() {
 //!     let router = init().await.expect("init");
 //!     assert_eq!(router.mounts().len(), 2);
+//!     // A boot-time check must decide "which family?" by the same rule the
+//!     // macro just applied; `routing::covering_family` IS that rule.
+//!     let families = ["api", "api/auth"];
+//!     assert_eq!(actus::routing::covering_family("api/things", families), Some("api"));
+//!     assert_eq!(actus::routing::covering_family("api/auth", families), Some("api/auth"));
 //! }
 //! ```
 //!
@@ -303,6 +308,13 @@ pub use actus_reply::Finalizer;
 // `::actus::Router` / `::actus::RouterBuilder` from generated code without
 // requiring downstream crates to depend on `actus-server` directly.
 pub use actus_server::{GIB, KIB, MIB, Mount, RateLimitClass, Router, RouterBuilder, Server};
+
+/// Route-resolution helpers, exposed for tools and boot-time checks —
+/// notably [`routing::covering_family`], the rule the `families` block of
+/// `app_routes!` uses to decide which family a mount belongs to, so a
+/// startup coverage check written against it cannot disagree with the
+/// compile-time one.
+pub use actus_controller::routing;
 
 /// WebSocket support — [`ws::upgrade`], [`ws::WebSocket`], [`ws::Message`].
 /// Available with the `websocket` feature.

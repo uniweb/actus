@@ -596,6 +596,52 @@ pub mod routing {
     use super::*;
     use std::collections::HashMap;
 
+    /// The segments of a mount path or family prefix, normalised exactly as
+    /// `RouterBuilder::add_route` and the `families` block of `app_routes!`
+    /// normalise them: surrounding slashes trimmed, empty segments dropped, a
+    /// trailing `*` (the catch-all sugar) removed — so `"api/*"`, `"/api/"`
+    /// and `"api"` are the same prefix, and `""` / `"*"` is the root.
+    pub fn family_segments(path: &str) -> Vec<&str> {
+        let mut segs: Vec<&str> = path
+            .trim_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segs.last() == Some(&"*") {
+            segs.pop();
+        }
+        segs
+    }
+
+    /// Which of `prefixes` covers `mount` — by the **same rule the `families`
+    /// block of `app_routes!` applies at compile time**, so a boot-time check
+    /// written against this cannot disagree with the compile-time one:
+    /// segment-aligned (`"api"` covers `"api/things"`, never `"apiary"`), the
+    /// **longest** covering prefix wins (so `"api/auth"` carves its subtree out
+    /// of `"api"`), a trailing `*` reads as the prefix before it, and the root
+    /// (`""` or `"*"`) covers every mount. Returns the winning prefix as it was
+    /// given, so the caller can look it up in its own table. On two prefixes
+    /// that normalise identically, the later one wins, as in the macro.
+    ///
+    /// Do not re-derive this with `mount.split('/').next()`: that matches by
+    /// first segment, agrees with the macro only while every family is a single
+    /// segment, and silently diverges the moment one nests.
+    pub fn covering_family<'a, I>(mount: &str, prefixes: I) -> Option<&'a str>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let m = family_segments(mount);
+        let mut best: Option<(&'a str, usize)> = None;
+        for p in prefixes {
+            let ps = family_segments(p);
+            let covers = ps.len() <= m.len() && ps.iter().zip(m.iter()).all(|(a, b)| a == b);
+            if covers && best.is_none_or(|(_, n)| ps.len() >= n) {
+                best = Some((p, ps.len()));
+            }
+        }
+        best.map(|(p, _)| p)
+    }
+
     /// Main route resolution function. Tries each route in declaration order
     /// and returns the first whose path pattern *and* verb both match, along
     /// with its extracted parameters.
@@ -1283,5 +1329,38 @@ mod resolve_tests {
         )
         .expect("route matches with no query");
         assert!(e2.get_string_array("tags").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod covering_family_tests {
+    use super::routing::covering_family;
+
+    #[test]
+    fn segment_aligned_longest_prefix_wins() {
+        let fams = ["api", "api/auth", "public"];
+        assert_eq!(covering_family("api/things", fams), Some("api"));
+        assert_eq!(covering_family("api/auth", fams), Some("api/auth"));
+        assert_eq!(covering_family("api/auth/oauth", fams), Some("api/auth"));
+        assert_eq!(
+            covering_family("api/authx", fams),
+            Some("api"),
+            "segment-aligned, not a string prefix"
+        );
+        assert_eq!(covering_family("apiary", fams), None);
+        assert_eq!(covering_family("health", fams), None);
+    }
+
+    #[test]
+    fn star_sugar_and_root() {
+        assert_eq!(covering_family("api/things", ["api/*"]), Some("api/*"));
+        assert_eq!(covering_family("anything/at/all", ["*"]), Some("*"));
+        assert_eq!(covering_family("", [""]), Some(""));
+        assert_eq!(covering_family("/api/", ["api"]), Some("api"));
+    }
+
+    #[test]
+    fn a_later_identical_prefix_wins_like_the_macro() {
+        assert_eq!(covering_family("api/x", ["api", "api/*"]), Some("api/*"));
     }
 }

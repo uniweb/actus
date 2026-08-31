@@ -1118,6 +1118,11 @@ impl Parse for AppRoutesInput {
 /// A mount path's segments, normalised the way `RouterBuilder::add_route`
 /// normalises them: surrounding slashes trimmed, a trailing `*` (the
 /// catch-all sugar) dropped — so `"api/*"` and `"api"` cover the same tree.
+///
+/// ⚠️ Keep in step with `actus_controller::routing::family_segments` /
+/// `covering_family`, the runtime twin consumers call from their boot-time
+/// checks (a proc-macro crate cannot depend on the runtime crate, so the rule
+/// is written twice; the crate-level nesting doctest pins that they agree).
 fn mount_segments(path: &str) -> Vec<String> {
     let mut segs: Vec<String> = path
         .trim_matches('/')

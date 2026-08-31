@@ -507,14 +507,24 @@ const FAMILIES: &[(&str, &[&str])] = &[
 /// there, an undeclared controller is legitimately unlimited and is skipped;
 /// here, the *omission is the failure being hunted*, which is why this walks
 /// `Router::mounts()` (a row per mounted controller, absences included).
-fn family_coverage(router: &Router) -> Result<(), String> {
+fn family_coverage(router: &Router, families: &[(&str, &[&str])]) -> Result<(), String> {
     let mut bad = Vec::new();
     for m in router.mounts() {
-        let family = m.mount.split('/').next().unwrap_or("");
-        // Not under a declared family → unconstrained (`health`, `*`, …).
-        let Some((_, floors)) = FAMILIES.iter().find(|(f, _)| *f == family) else {
-            continue;
+        // Which family covers this mount is decided by the SAME rule the
+        // `families` block applies at compile time — segment-aligned, longest
+        // prefix wins — so this check and that one cannot disagree. Do not
+        // re-derive it with `mount.split('/').next()`: that agrees only while
+        // every family is one segment deep.
+        let Some(family) =
+            actus::routing::covering_family(&m.mount, families.iter().map(|(f, _)| *f))
+        else {
+            continue; // not under a declared family → unconstrained (`health`, `*`, …)
         };
+        let floors = families
+            .iter()
+            .find(|(f, _)| *f == family)
+            .map(|(_, floors)| *floors)
+            .expect("covering_family returns one of the prefixes it was given");
         match m.expects {
             None => bad.push(format!(
                 "  - {} at `{}` declares no caller expectation (add `expects = …` \
@@ -807,7 +817,7 @@ async fn main() -> anyhow::Result<()> {
     }
     // Same fail-fast shape for the route-family floors: every controller
     // under `api/` must declare one the family accepts.
-    if let Err(msg) = family_coverage(&router) {
+    if let Err(msg) = family_coverage(&router, FAMILIES) {
         anyhow::bail!("{msg}");
     }
     if check_only {
@@ -873,7 +883,36 @@ mod tests {
         // MeController declares "credential" (with a hook), TasksController
         // declares "anonymous", HealthController is outside every family.
         let router = init(Storage::new()).await.expect("init");
-        assert!(family_coverage(&router).is_ok());
+        assert!(family_coverage(&router, FAMILIES).is_ok());
+    }
+
+    #[test]
+    fn family_coverage_resolves_a_nested_family_like_the_macro_does() {
+        // `api/auth` accepts only "session-entry"; `api` accepts only
+        // "credential". A "session-entry" controller at api/auth must resolve
+        // to the DEEPER family (pass), and the same controller at api/authx —
+        // a string prefix but not a segment prefix — must resolve to `api`
+        // (fail). First-segment matching would get both wrong.
+        struct Login;
+        #[controller(expects = "session-entry")]
+        impl Login {
+            routes! { "" => idx() }
+            async fn idx(&self) -> Reply {
+                reply!()
+            }
+        }
+        let nested: &[(&str, &[&str])] =
+            &[("api", &["credential"]), ("api/auth", &["session-entry"])];
+        let ok = RouterBuilder::new()
+            .add_route("api/auth", Arc::new(Login))
+            .build();
+        assert_eq!(family_coverage(&ok, nested), Ok(()));
+        let wrong = RouterBuilder::new()
+            .add_route("api/authx", Arc::new(Login))
+            .build();
+        let err =
+            family_coverage(&wrong, nested).expect_err("api/authx is under `api`, not `api/auth`");
+        assert!(err.contains("family `api` does not accept"), "{err}");
     }
 
     // The three ways a controller can be wrong about its family, as
@@ -917,7 +956,8 @@ mod tests {
             // though it declares nothing.
             .add_route("health", Arc::new(NoFloor))
             .build();
-        let err = family_coverage(&router).expect_err("three violations must fail the check");
+        let err =
+            family_coverage(&router, FAMILIES).expect_err("three violations must fail the check");
         assert!(
             err.contains("NoFloor") && err.contains("api/nofloor"),
             "names the silent controller: {err}"

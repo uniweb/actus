@@ -489,10 +489,12 @@ const FAMILIES: &[(&str, &[&str])] = &[
 fn family_coverage(router: &Router) -> Result<(), String> {
     let mut bad = Vec::new();
     for m in router.mounts() {
-        let family = m.mount.split('/').next().unwrap_or("");
-        let Some((_, floors)) = FAMILIES.iter().find(|(f, _)| *f == family) else {
+        // The same rule the `families` block applies at compile time —
+        // segment-aligned, longest prefix wins — so the two checks agree.
+        let Some(family) = actus::routing::covering_family(&m.mount, FAMILIES.iter().map(|(f, _)| *f)) else {
             continue; // not under a family ("health", a root catch-all): unconstrained
         };
+        let floors = FAMILIES.iter().find(|(f, _)| *f == family).map(|(_, x)| *x).unwrap();
         match m.expects {
             None => bad.push(format!("{} at `{}` declares no caller expectation", m.controller, m.mount)),
             Some(e) if !floors.contains(&e) => bad.push(format!("{} at `{}` declares {e:?}, not accepted by `{family}`", m.controller, m.mount)),
@@ -504,7 +506,7 @@ fn family_coverage(router: &Router) -> Result<(), String> {
 }
 ```
 
-Every carve-out is now a line of code somebody had to write, in one table a reviewer reads top to bottom.
+Every carve-out is now a line of code somebody had to write, in one table a reviewer reads top to bottom. Decide *which* family covers a mount with `routing::covering_family`, never with `mount.split('/').next()`: first-segment matching agrees with the compile-time block only while every family is one segment deep, and the two checks diverge silently the moment one nests.
 
 **Or make the omission a compile error.** A `families` block in `app_routes!` names the prefixes whose controllers must declare — and, optionally, which floors each accepts:
 

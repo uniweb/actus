@@ -10,6 +10,18 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- `routing::covering_family(mount, prefixes)` (and `routing::family_segments`),
+  re-exported at `actus::routing`: which family covers a mount, by the exact
+  rule the `families` block of `app_routes!` applies at compile time —
+  segment-aligned, longest prefix wins, `*` sugar, root covers all. A boot-time
+  coverage check written against it cannot disagree with the compile-time one.
+  Consumers had been re-deriving the rule as `mount.split('/').next()`, which
+  agrees only while every family is a single segment and diverges silently the
+  moment one nests — found in production the first time a family was nested.
+  The README snippet and `examples/advanced` now use it.
+
 ## [1.3.0]
 
 ### Added
