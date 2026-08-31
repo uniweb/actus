@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "actus"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "actus-controller",
  "actus-reply",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "actus-advanced-example"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "actus",
  "anyhow",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "actus-basic-example"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "actus",
  "anyhow",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "actus-controller"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "actus-controller-macros",
  "actus-reply",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "actus-controller-macros"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "actus-reply"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "actus-server"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "actus",
  "actus-controller",
