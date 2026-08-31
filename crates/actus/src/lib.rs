@@ -210,6 +210,46 @@
 //! async fn main() { let _ = init().await; }
 //! ```
 //!
+//! Families **nest, longest prefix winning** — the same rule as routing — so an
+//! exception can be confined to the one subtree that earns it, without moving a
+//! URL. Here `dev/auth` may declare `"session-entry"` and nothing else under
+//! `dev/` may; this doctest *runs* `init`, so the `const` check is evaluated:
+//!
+//! ```
+//! use actus::prelude::*;
+//!
+//! struct Registry;
+//! #[controller(expects = "credential")]
+//! impl Registry {
+//!     routes! { GET "" => list() }
+//!     async fn list(&self) -> Reply { reply!() }
+//! }
+//!
+//! struct Login;
+//! #[controller(expects = "session-entry")]
+//! impl Login {
+//!     routes! { POST "" => login() }
+//!     async fn login(&self) -> Reply { reply!() }
+//! }
+//!
+//! app_routes! {
+//!     families {
+//!         "dev"      => ["credential"],
+//!         "dev/auth" => ["session-entry"],   // the deeper entry wins for its subtree
+//!     }
+//!     routes {
+//!         "dev/registry" => Registry,
+//!         "dev/auth"     => Login,
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let router = init().await.expect("init");
+//!     assert_eq!(router.mounts().len(), 2);
+//! }
+//! ```
+//!
 //! And a family that covers **no mount** is a compile error at its literal —
 //! a typo there would otherwise constrain nothing:
 //!
