@@ -538,6 +538,14 @@ error[E0277]: `SpaController` is mounted under a route family that requires a de
 
 An entry with an accepted list also checks the *value*, in a `const` evaluated when `init` is compiled (a floor the family rejects is an `E0080` naming the controller). A family that covers no mount is a compile error at its literal — a typo there would otherwise constrain nothing. **Families nest, longest prefix winning** — the same rule as routing — so an exception can be confined to the one subtree that earns it without moving a URL: `"dev" => ["credential"]` beside `"dev/auth" => ["session-entry"]` means every `/dev` controller must be credential-gated *except* the login family, which must say so. Keep the boot-time check too: it is what carries the rules a compile cannot (a `"credential"` floor needs a hook), and it needs no reachability.
 
+**When a lane needs an exception, do not move the URLs.** The temptation, once a family is checkable, is to make it *uniform* — hoist the login routes out of `api/` into their own prefix, or carve a credential-only `dev/` out from under the one controller that must stay anonymous — so the family can accept a single floor. Resist it. The top-level segment is already spent: it is what every intermediary, CORS rule and client keys on, and a hoist changes shipped URLs to buy a property a declaration gives you for free. The Actus way is the opposite order:
+
+1. **Name the reason as its own floor.** `"session-entry"` for the login family, `"debug-only"` for a seeder that is unrouted in release — a category with closed membership, not a comment above an attribute.
+2. **Confine it with a nested family.** `"dev" => ["credential"]` beside `"dev/auth" => ["session-entry"]` — the exception is admitted on exactly the subtree that earns it, and plain `"anonymous"` is never accepted on the lane at all.
+3. **Only then touch the URL space**, and only if the routes were wrong on their own merits.
+
+A new controller then has two ways to join the lane — declare the floor the lane accepts, or edit the `families` table in the mount file where the diff is visible — and no way to inherit an exception silently. That is the whole point: the invariant lives in declarations the build checks, not in the shape of the paths.
+
 **Per-request enforcement keys on the declaration, not the path.** `Server::router()` shares the route tree the server serves, so a middleware can ask the framework's own longest-prefix matcher which controller a request will reach and read its floor — no path allow-list, no re-implemented matching, and a controller mounted somewhere new is covered the moment it is mounted:
 
 ```rust
