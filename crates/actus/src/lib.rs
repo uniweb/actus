@@ -250,6 +250,13 @@
 //! }
 //! ```
 //!
+//! That nesting is the intended answer when a lane needs an exception: name the
+//! reason as its own floor, confine it to the subtree that earns it, and leave
+//! the URLs alone — the top-level segment is what every client and intermediary
+//! keys on, and moving routes to make a family uniform spends shipped URLs on a
+//! property a declaration already provides. (The README's "Route families"
+//! section spells this out.)
+//!
 //! And a family that covers **no mount** is a compile error at its literal —
 //! a typo there would otherwise constrain nothing:
 //!
