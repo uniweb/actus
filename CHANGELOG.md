@@ -30,6 +30,18 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
   That was wrong and unverified: `routing::resolve` rejects it before
   extraction. An optional flag is spelled `confirm: bool = false`.)
 
+- **`ExtractedParams::get_bool` now returns `400` when the parameter is absent**,
+  as `get_string`, `get_i64` and every other scalar getter already did. It was
+  the one getter that invented a value — `Ok(false)` — instead of erroring, and
+  that invented value is what made a declared `bool` default unreachable.
+
+  **Not a breaking change**, despite being a behaviour change to a public
+  method: `ExtractedParams` has private fields and no public constructor, so
+  `routing::resolve` is the only way to obtain one, and it rejects an absent
+  bare `bool` before this method can be reached. The branch was unreachable from
+  outside the crate. Use `get_bool_optional` to tell absence from an explicit
+  `false`.
+
 ### Added
 
 - `ExtractedParams::get_bool_optional` — distinguishes an **absent** bool

@@ -552,16 +552,17 @@ impl ExtractedParams {
             .map_err(|_| WebError::BadRequest(format!("Invalid float: {}", name)))
     }
 
-    /// Read path/query parameter `name` as a bool — `false` when absent,
-    /// empty, `"false"`, or `"0"`; `true` otherwise.
+    /// Read path/query parameter `name` as a bool — `false` for an empty value,
+    /// `"false"` or `"0"`; `true` otherwise. **`400` when absent**, exactly as
+    /// `get_string` / `get_i64` / every other scalar getter, all of which go
+    /// through `require_scalar`.
     ///
-    /// ⛔ **Absence is `Ok(false)` here, NOT an error — which is why a declared
-    /// default cannot be applied through this method.** Every other typed getter
-    /// (`get_i64`, `get_string`, …) goes through `require_scalar` and returns
-    /// `Err` when the parameter is missing, which is exactly what lets the
-    /// generated `…unwrap_or(default)` fall back. `bool` is the one type whose
-    /// "missing" is a usable value, so it swallowed the absence and **every
-    /// `param: bool = true` in every consumer silently behaved as `false`**.
+    /// ⛔ **It did NOT always do that**, and the history is the point. It used to
+    /// answer `Ok(false)` for a missing parameter — the one getter that invented
+    /// a value instead of erroring. The generated default is
+    /// `get_x(name).unwrap_or(default)`, which relies on that `Err`, so this
+    /// method swallowed the absence and **every `param: bool = true` silently
+    /// behaved as `false`**.
     ///
     /// ⚠️ Found in a consumer, 2026-09-04: a cancellation route declared
     /// `at_period_end: bool = true` and documented the reversible, deferred form as
@@ -570,27 +571,21 @@ impl ExtractedParams {
     /// the route promised. It stayed invisible because the route behaved correctly
     /// whenever the parameter **was** supplied.
     ///
-    /// ⇒ Use [`Self::get_bool_optional`] when a caller has declared a default.
+    /// ⇒ Use [`Self::get_bool_optional`] when you need to tell an absent
+    /// parameter from an explicit `false`; that is what a declared default reads.
     ///
-    /// ⚠️ **Correction, 2026-09-04.** This doc previously justified the
-    /// `unwrap_or(false)` below by saying a bare `param: bool` means *"false
-    /// unless asked for"* (`confirm`, `dry_run`) and that erroring on absence
-    /// would turn those into `400`s. **That is false, and was never checked**:
-    /// a bare `bool` query parameter *already* 400s, because
-    /// [`routing::param_is_required`] reports it required and `resolve` rejects
-    /// the request before extraction runs. An optional flag must be written
-    /// `confirm: bool = false` — see that function for why `bool` is
-    /// deliberately not exempt.
-    ///
-    /// ⇒ **So the fallback below is unreachable through the macro**, for either
-    /// arm: the defaulted arm calls `get_bool_optional`, and the bare arm is
-    /// only reached once `resolve` has confirmed the value is present. It is
-    /// kept only for direct callers of [`ExtractedParams`], and aligning it with
-    /// the other getters (`Err` on absence, as `require_scalar` gives them) is
-    /// queued for a `2.0` rather than taken here, since it is observable to
-    /// them.
+    /// ⚠️ **Correction, 2026-09-04.** This doc used to justify the old
+    /// `unwrap_or(false)` by saying a bare `param: bool` means *"false unless
+    /// asked for"* (`confirm`, `dry_run`) and that erroring on absence would turn
+    /// those into `400`s. **That was false and was never checked**: a bare `bool`
+    /// *already* 400s, because [`routing::param_is_required`] reports it required
+    /// and `resolve` rejects the request before extraction runs. An optional flag
+    /// is written `confirm: bool = false`. The fallback was the last code in the
+    /// crate asserting the opposite of what the router does, so it is gone —
+    /// nothing outside this crate could reach it, since [`ExtractedParams`] has
+    /// no public constructor and `resolve` is the only way to obtain one.
     pub fn get_bool(&self, name: &str) -> Result<bool, WebError> {
-        Ok(self.get_bool_optional(name)?.unwrap_or(false))
+        Ok(!matches!(self.require_scalar(name)?, "" | "false" | "0"))
     }
 
     /// Like [`Self::get_bool`], but distinguishes **absent** (`None`) from the
@@ -1528,13 +1523,22 @@ mod bool_default_tests {
     }
 
     #[test]
-    fn a_bare_bool_still_reads_false_when_absent() {
-        // ⚖️ The half that must NOT change. A bare `param: bool` legitimately means
-        // "false unless asked for" — `confirm`, `dry_run`, `strict_policy` — and
-        // making absence an error would turn every one of those into a `400`.
-        assert!(!params(&[]).get_bool("confirm").unwrap());
+    fn get_bool_errors_on_absence_like_every_other_scalar_getter() {
+        // ⛔ This test used to assert the opposite, on the stated grounds that a
+        // bare `param: bool` means "false unless asked for" and erroring would
+        // turn `confirm` / `dry_run` into `400`s. That was never true — a bare
+        // `bool` is required and `resolve` 400s it before extraction (see
+        // `routing::param_is_required`) — and a red test carrying a confident
+        // wrong reason is what would stop the next person from fixing it.
+        assert!(
+            params(&[]).get_bool("confirm").is_err(),
+            "absence is an `Err` here, as it is for get_string / get_i64 / the rest"
+        );
+        // Present values parse exactly as before.
         assert!(params(&[("confirm", "1")]).get_bool("confirm").unwrap());
         assert!(!params(&[("confirm", "0")]).get_bool("confirm").unwrap());
+        assert!(!params(&[("confirm", "false")]).get_bool("confirm").unwrap());
+        assert!(!params(&[("confirm", "")]).get_bool("confirm").unwrap());
     }
 }
 
