@@ -570,10 +570,25 @@ impl ExtractedParams {
     /// the route promised. It stayed invisible because the route behaved correctly
     /// whenever the parameter **was** supplied.
     ///
-    /// ⇒ Use [`Self::get_bool_optional`] when a caller has declared a default. This
-    /// method keeps its semantics because a **bare** `param: bool` legitimately
-    /// means *"false unless asked for"* (`confirm`, `dry_run`, `strict_policy`),
-    /// and making absence an error would turn those into `400`s.
+    /// ⇒ Use [`Self::get_bool_optional`] when a caller has declared a default.
+    ///
+    /// ⚠️ **Correction, 2026-09-04.** This doc previously justified the
+    /// `unwrap_or(false)` below by saying a bare `param: bool` means *"false
+    /// unless asked for"* (`confirm`, `dry_run`) and that erroring on absence
+    /// would turn those into `400`s. **That is false, and was never checked**:
+    /// a bare `bool` query parameter *already* 400s, because
+    /// [`routing::param_is_required`] reports it required and `resolve` rejects
+    /// the request before extraction runs. An optional flag must be written
+    /// `confirm: bool = false` — see that function for why `bool` is
+    /// deliberately not exempt.
+    ///
+    /// ⇒ **So the fallback below is unreachable through the macro**, for either
+    /// arm: the defaulted arm calls `get_bool_optional`, and the bare arm is
+    /// only reached once `resolve` has confirmed the value is present. It is
+    /// kept only for direct callers of [`ExtractedParams`], and aligning it with
+    /// the other getters (`Err` on absence, as `require_scalar` gives them) is
+    /// queued for a `2.0` rather than taken here, since it is observable to
+    /// them.
     pub fn get_bool(&self, name: &str) -> Result<bool, WebError> {
         Ok(self.get_bool_optional(name)?.unwrap_or(false))
     }
@@ -677,6 +692,48 @@ pub mod routing {
         best.map(|(p, _)| p)
     }
 
+    /// Whether an absent value for `param` makes the request a `400`.
+    ///
+    /// ⭐ **This is the rule [`resolve`] enforces, exported so that a tool
+    /// reporting requiredness cannot disagree with the router that enforces it.**
+    /// The OpenAPI generator's `required` flag is computed from this; before it
+    /// was extracted the same expression was written out in two crates with
+    /// nothing relating them, and they agreed only by diligence.
+    ///
+    /// The rule is **syntactic, and uniform across every scalar type**: a query
+    /// parameter is required unless it declared a default. Requiredness is
+    /// therefore readable straight off a `routes!` block — `name: T` is required,
+    /// `name: T = x` is optional — without knowing what `T` is.
+    ///
+    /// ⛔ **`bool` is deliberately NOT exempt**, though the pull to exempt it is
+    /// strong: `confirm: bool` is required, and an optional flag must be written
+    /// `confirm: bool = false`. Two reasons. It keeps *both* meanings sayable —
+    /// exempting `bool` would leave no way to declare a required one. And an
+    /// absent `bool` and an explicit `?flag=false` are genuinely distinguishable
+    /// on the wire (see [`ExtractedParams::get_bool_optional`]), so reading
+    /// absence as `false` would discard a distinction the request carries.
+    ///
+    /// [`ParamType::StringArray`] is exempt for the opposite reason — its
+    /// exemption is **forced, not chosen**: urlencoding cannot express "present
+    /// but empty" (see [`Params::get_all_optional`]), so there is no
+    /// required/optional distinction available to lose. ⇒ A new type earns an
+    /// exemption only when the wire format denies it the distinction. That it
+    /// merely *has* a natural zero value is not enough.
+    pub fn param_is_required(param: &ParamDef) -> bool {
+        match param.source {
+            // A `{name}` capture is always present when the pattern matched, so
+            // absence never arises. (OpenAPI additionally *mandates*
+            // `required: true` for path parameters.)
+            ParamSource::Path => true,
+            // The body is required by whichever getter reads it.
+            ParamSource::Body => true,
+            // The only case that actually varies.
+            ParamSource::Query => {
+                param.default.is_none() && !matches!(param.ty, ParamType::StringArray)
+            }
+        }
+    }
+
     /// Main route resolution function. Tries each route in declaration order
     /// and returns the first whose path pattern *and* verb both match, along
     /// with its extracted parameters.
@@ -748,17 +805,15 @@ pub mod routing {
                             );
                         }
                         ParamSource::Query => {
-                            // Extract from query params. A `Vec<String>`
-                            // parameter is inherently optional — absent means
-                            // the empty list, never a 400. Other scalar types
-                            // are required unless they declared a default.
+                            // Requiredness is `param_is_required` and nothing
+                            // else — the OpenAPI generator reports the same
+                            // predicate, so a spec cannot claim a parameter is
+                            // optional that this branch would 400.
                             if let Some(value) = params.query.get(param_def.name) {
                                 extracted
                                     .query
                                     .insert(param_def.name.to_string(), value.clone());
-                            } else if param_def.default.is_none()
-                                && !matches!(param_def.ty, ParamType::StringArray)
-                            {
+                            } else if param_is_required(param_def) {
                                 return Err(WebError::BadRequest(format!(
                                     "Missing required parameter: {}",
                                     param_def.name
@@ -1480,5 +1535,94 @@ mod bool_default_tests {
         assert!(!params(&[]).get_bool("confirm").unwrap());
         assert!(params(&[("confirm", "1")]).get_bool("confirm").unwrap());
         assert!(!params(&[("confirm", "0")]).get_bool("confirm").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod param_requiredness_tests {
+    //! ⭐ **The requiredness rule is one predicate, and this is where the
+    //! decision it encodes is written down.**
+    //!
+    //! `routing::resolve` (which 400s) and the OpenAPI generator (which reports
+    //! `required`) both call [`routing::param_is_required`]. They used to spell
+    //! the rule out separately and agreed only by diligence; a third site —
+    //! `ExtractedParams::get_bool`'s `unwrap_or(false)` — quietly encoded the
+    //! *opposite* rule for `bool`, and that disagreement is what made a declared
+    //! `bool` default unreachable (fixed 2026-09-04).
+    use super::routing::param_is_required;
+    use super::*;
+
+    fn q(ty: ParamType, default: Option<ParamDefault>) -> ParamDef {
+        ParamDef {
+            name: "p",
+            ty,
+            source: ParamSource::Query,
+            default,
+        }
+    }
+
+    #[test]
+    fn requiredness_is_syntactic_and_uniform_across_scalar_types() {
+        // ⭐ The property worth having: whether a parameter is required is
+        // readable off `routes!` without knowing the type. `name: T` is
+        // required; `name: T = x` is not. No per-type table.
+        for ty in [
+            ParamType::String,
+            ParamType::Int,
+            ParamType::U64,
+            ParamType::U32,
+            ParamType::F64,
+            ParamType::Bool,
+        ] {
+            assert!(
+                param_is_required(&q(ty, None)),
+                "a bare `{ty:?}` query param is required"
+            );
+        }
+        assert!(!param_is_required(&q(
+            ParamType::String,
+            Some(ParamDefault::String("x"))
+        )));
+        assert!(!param_is_required(&q(
+            ParamType::U32,
+            Some(ParamDefault::U32(1))
+        )));
+        assert!(!param_is_required(&q(
+            ParamType::Bool,
+            Some(ParamDefault::Bool(true))
+        )));
+    }
+
+    #[test]
+    fn a_bare_bool_is_required_and_that_is_the_deliberate_choice() {
+        // ⛔ Do not "fix" this into `false unless asked for`. Exempting `bool`
+        // would leave NO way to declare a required one, and it would discard a
+        // distinction the wire actually carries — absent and `?p=false` are
+        // different requests (see `ExtractedParams::get_bool_optional`).
+        // An optional flag is spelled `confirm: bool = false`.
+        assert!(param_is_required(&q(ParamType::Bool, None)));
+        assert!(!param_is_required(&q(
+            ParamType::Bool,
+            Some(ParamDefault::Bool(false))
+        )));
+    }
+
+    #[test]
+    fn string_array_is_the_one_exemption_and_it_is_forced_not_chosen() {
+        // ⚖️ urlencoding cannot express "present but empty", so there is no
+        // required/optional distinction available to lose. That is the bar a
+        // future exemption has to clear — a natural zero value is not enough.
+        assert!(!param_is_required(&q(ParamType::StringArray, None)));
+    }
+
+    #[test]
+    fn a_path_capture_is_always_required() {
+        // The pattern matched, so the capture is present; absence never arises.
+        assert!(param_is_required(&ParamDef {
+            name: "id",
+            ty: ParamType::U64,
+            source: ParamSource::Path,
+            default: None,
+        }));
     }
 }

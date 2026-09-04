@@ -43,7 +43,9 @@
 //!   The flexible form is a closure; the most common shape is
 //!   `|mount| mount.starts_with("api/")`.
 
-use actus_controller::{DEFAULT_VERBS, ParamDefault, ParamSource, ParamType, RouteDef, Verb};
+use actus_controller::{
+    DEFAULT_VERBS, ParamDefault, ParamSource, ParamType, RouteDef, Verb, routing,
+};
 use serde_json::{Map, Value, json};
 
 use crate::router::Router;
@@ -334,11 +336,14 @@ fn split_params(route: &RouteDef) -> (Vec<Value>, Option<Value>) {
                 let mut entry = Map::new();
                 entry.insert("name".into(), Value::String(p.name.to_string()));
                 entry.insert("in".into(), Value::String("query".into()));
-                // A `Vec<String>` is inherently optional — absent → `[]`,
-                // never a 400 (see `Params::get_all`). Anything else is
-                // required iff no default.
-                let required = !matches!(p.ty, ParamType::StringArray) && p.default.is_none();
-                entry.insert("required".into(), Value::Bool(required));
+                // The router's own rule, not a copy of it: `param_is_required`
+                // is what `routing::resolve` consults to decide whether an
+                // absent value is a 400. Re-deriving it here is how a spec
+                // starts lying about the server it documents.
+                entry.insert(
+                    "required".into(),
+                    Value::Bool(routing::param_is_required(p)),
+                );
                 entry.insert("schema".into(), schema_for(p.ty, p.default.as_ref()));
                 params.push(Value::Object(entry));
             }
@@ -511,6 +516,57 @@ mod tests {
 
         assert!(spec["paths"]["/api/things"]["get"].is_object());
         assert!(spec["paths"]["/api/things"]["post"].is_object());
+    }
+
+    #[test]
+    fn the_spec_reports_a_bare_bool_required_because_the_router_enforces_it() {
+        // ⭐ Spec and router must not disagree about requiredness. Both now read
+        // `routing::param_is_required`; this pins the answer for the case that
+        // was ambiguous — a bare `bool`, which IS required (an optional flag is
+        // written `confirm: bool = false`). If someone ever exempts `bool`, this
+        // fails alongside the routing tests rather than silently shipping a spec
+        // that promises callers the parameter is optional while the router 400s.
+        static R: &[RouteDef] = &[RouteDef {
+            pattern: "",
+            handler_id: "handler_0",
+            handler: "del",
+            verb: &[Verb::POST],
+            params: &[
+                ParamDef {
+                    name: "confirm",
+                    ty: ParamType::Bool,
+                    source: ParamSource::Query,
+                    default: None,
+                },
+                ParamDef {
+                    name: "at_period_end",
+                    ty: ParamType::Bool,
+                    source: ParamSource::Query,
+                    default: Some(ParamDefault::Bool(true)),
+                },
+            ],
+            doc: None,
+        }];
+        let router = build_router(&[("api/cancel", R)]);
+        let spec = generate(&router, &opts(), |_| true);
+        let params = spec["paths"]["/api/cancel"]["post"]["parameters"]
+            .as_array()
+            .expect("parameters array");
+
+        let confirm = &params[0];
+        assert_eq!(confirm["name"], "confirm");
+        assert_eq!(
+            confirm["required"], true,
+            "a bare `bool` is required — the spec must say what `resolve` does"
+        );
+
+        let at_period_end = &params[1];
+        assert_eq!(at_period_end["name"], "at_period_end");
+        assert_eq!(at_period_end["required"], false);
+        assert_eq!(
+            at_period_end["schema"]["default"], true,
+            "and the declared default must be the one advertised"
+        );
     }
 
     #[test]

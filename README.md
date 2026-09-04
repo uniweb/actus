@@ -235,11 +235,28 @@ Parameters are extracted automatically from URL path segments, query strings, an
 | `i64` / `u64` | query or path      | `id: u64`                | required; 400 if missing or not parseable      |
 | `u32`         | query or path      | `page: u32 = 1`          | optional with default                          |
 | `f64`         | query              | `score: f64`             | required floating point                        |
-| `bool`        | query              | `verbose: bool = false`  | optional with default                          |
+| `bool`        | query              | `verbose: bool` / `= false` | required; **not** falsy-when-absent (see below) |
 | `Vec<String>` | query              | `tags: Vec<String>`      | all values of a repeated key (`?tags=a&tags=b` → `["a", "b"]`; `[]` if absent) |
 | `JsonValue`   | request body       | `data: JsonValue`        | parsed `serde_json::Value`                     |
 
-Path parameters use `{name}` syntax in the route pattern and are always required. A trailing `{...name}` is a *rest* path parameter — typed `String`, capturing the joined remainder of the path (zero or more segments; `""` when nothing trails). Query parameters declared with a default are optional.
+Path parameters use `{name}` syntax in the route pattern and are always required. A trailing `{...name}` is a *rest* path parameter — typed `String`, capturing the joined remainder of the path (zero or more segments; `""` when nothing trails).
+
+**Requiredness is syntactic, and the same for every scalar type: a query parameter is required unless it declares a default.** `name: T` is required — a request omitting it gets a `400`; `name: T = x` is optional. You can read requiredness straight off a `routes!` block without knowing what `T` is, and `actus::routing::param_is_required` is that rule, which is also what the OpenAPI generator reports.
+
+⚠️ **`bool` included — this is the one that surprises people.** `confirm: bool` is **required**, not "false unless asked for". An optional flag is spelled `confirm: bool = false`:
+
+```rust
+routes! {
+    // required: omitting `confirm` is a 400
+    POST "delete"  => delete(confirm: bool),
+    // optional: omitting `at_period_end` yields `true`
+    POST "cancel"  => cancel(at_period_end: bool = true),
+}
+```
+
+Two reasons it works this way. Exempting `bool` would leave **no way to declare a required one**. And an absent parameter and an explicit `?flag=false` are genuinely different requests — treating them alike would discard a distinction the wire carries.
+
+`Vec<String>` is the sole exemption, and a forced rather than chosen one: urlencoding cannot express "present but empty", so there is no required/optional distinction available to lose.
 
 Query parameters are a **multimap**: repeated keys (`?tags=a&tags=b`) accumulate in request order. A scalar parameter (`String`, `u64`, `bool`, …) reads the *first* value; a `Vec<String>` parameter reads *all* of them, so a one-element list (`?tags=a`) and a many-element one flow through the same path. `application/x-www-form-urlencoded` body fields are folded into this same map (appended, not overwritten — a form field shares a name space with the query string). Comma-separated values in a single key (`?tags=a,b`) are *not* split — that's one value, `"a,b"`.
 

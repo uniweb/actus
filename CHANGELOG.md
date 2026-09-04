@@ -24,9 +24,11 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
   direction, and the opposite of what the route documented. It stayed invisible
   because the route behaved correctly whenever the parameter *was* supplied.
 
-  A **bare** `param: bool` is unchanged and still reads `false` when absent:
-  `confirm`, `dry_run` and `strict_policy` legitimately mean "false unless
-  asked for", and making absence an error would turn each into a `400`.
+  A **bare** `param: bool` is unchanged — it is **required**, and a request
+  omitting it gets a `400`, exactly as a bare `String` or `u64` does. (An
+  earlier draft of this entry said a bare `bool` reads `false` when absent.
+  That was wrong and unverified: `routing::resolve` rejects it before
+  extraction. An optional flag is spelled `confirm: bool = false`.)
 
 ### Added
 
@@ -34,6 +36,22 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
   parameter (`None`) from one supplied as `false`, which is the reader a
   declared default needs. Mirrors `Params::get_bool_optional` on the
   pre-resolution type.
+
+- `routing::param_is_required(&ParamDef)`, re-exported at
+  `actus::routing`: whether an absent value for a parameter makes the request a
+  `400` — **the rule `routing::resolve` enforces**, exported so a tool reporting
+  requiredness cannot disagree with the router. The OpenAPI generator's
+  `required` flag now calls it instead of re-deriving the same expression in a
+  second crate, where the two agreed only by diligence and would have diverged
+  the first time a new inherently-optional type was added.
+
+  The rule it fixes in one place: a query parameter is **required unless it
+  declared a default**, uniformly across every scalar type, so requiredness is
+  readable off a `routes!` block without knowing the type. `ParamType::StringArray`
+  is the sole exemption, and a forced one — urlencoding cannot express "present
+  but empty", so no distinction is available to lose. `bool` is deliberately not
+  exempt: exempting it would leave no way to declare a required bool, and would
+  discard a distinction the wire does carry.
 
 ## [1.4.0]
 
