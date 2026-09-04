@@ -10,6 +10,31 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A declared `bool` route-parameter default was unreachable.** Every typed
+  parameter reaches its default through the generated
+  `get_x(name).unwrap_or(default)`, which works because `get_x` returns `Err`
+  on a missing parameter. `bool` is the one type whose *absence* is itself a
+  usable value, so `get_bool` answered `Ok(false)` rather than erroring —
+  `unwrap_or` unwrapped that `false` and **the default was dead code**. Every
+  `param: bool = true` silently behaved as `false`. Found in a consumer: a
+  cancellation route declaring `at_period_end: bool = true` cancelled
+  *immediately* when the client omitted the parameter — the destructive
+  direction, and the opposite of what the route documented. It stayed invisible
+  because the route behaved correctly whenever the parameter *was* supplied.
+
+  A **bare** `param: bool` is unchanged and still reads `false` when absent:
+  `confirm`, `dry_run` and `strict_policy` legitimately mean "false unless
+  asked for", and making absence an error would turn each into a `400`.
+
+### Added
+
+- `ExtractedParams::get_bool_optional` — distinguishes an **absent** bool
+  parameter (`None`) from one supplied as `false`, which is the reader a
+  declared default needs. Mirrors `Params::get_bool_optional` on the
+  pre-resolution type.
+
 ## [1.4.0]
 
 ### Added

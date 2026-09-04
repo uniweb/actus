@@ -554,11 +554,46 @@ impl ExtractedParams {
 
     /// Read path/query parameter `name` as a bool — `false` when absent,
     /// empty, `"false"`, or `"0"`; `true` otherwise.
+    ///
+    /// ⛔ **Absence is `Ok(false)` here, NOT an error — which is why a declared
+    /// default cannot be applied through this method.** Every other typed getter
+    /// (`get_i64`, `get_string`, …) goes through `require_scalar` and returns
+    /// `Err` when the parameter is missing, which is exactly what lets the
+    /// generated `…unwrap_or(default)` fall back. `bool` is the one type whose
+    /// "missing" is a usable value, so it swallowed the absence and **every
+    /// `param: bool = true` in every consumer silently behaved as `false`**.
+    ///
+    /// ⚠️ Found in a consumer, 2026-09-04: a cancellation route declared
+    /// `at_period_end: bool = true` and documented the reversible, deferred form as
+    /// its default. A client that omitted the parameter got the **immediate**
+    /// cancellation instead — the destructive direction, and the opposite of what
+    /// the route promised. It stayed invisible because the route behaved correctly
+    /// whenever the parameter **was** supplied.
+    ///
+    /// ⇒ Use [`Self::get_bool_optional`] when a caller has declared a default. This
+    /// method keeps its semantics because a **bare** `param: bool` legitimately
+    /// means *"false unless asked for"* (`confirm`, `dry_run`, `strict_policy`),
+    /// and making absence an error would turn those into `400`s.
     pub fn get_bool(&self, name: &str) -> Result<bool, WebError> {
+        Ok(self.get_bool_optional(name)?.unwrap_or(false))
+    }
+
+    /// Like [`Self::get_bool`], but distinguishes **absent** (`None`) from the
+    /// value `false` — the reader a declared default needs.
+    ///
+    /// ⭐ This exists because `bool` is the only parameter type where "not
+    /// supplied" and "supplied as the falsy value" are both meaningful. For every
+    /// other type the absence is already an `Err` and the default falls out of
+    /// `unwrap_or`; here it has to be asked for explicitly.
+    ///
+    /// The `_optional` name is the crate's convention for exactly this pair —
+    /// see [`Params::get_bool_optional`], which draws the same distinction on
+    /// the pre-resolution type. (This one returns `Result` because every
+    /// `ExtractedParams` getter does; it has no failure case of its own.)
+    pub fn get_bool_optional(&self, name: &str) -> Result<Option<bool>, WebError> {
         Ok(self
             .scalar(name)
-            .map(|s| !s.is_empty() && s != "false" && s != "0")
-            .unwrap_or(false))
+            .map(|s| !s.is_empty() && s != "false" && s != "0"))
     }
 
     /// All values for `name` (in request order; empty if the name wasn't
@@ -1362,5 +1397,88 @@ mod covering_family_tests {
     #[test]
     fn a_later_identical_prefix_wins_like_the_macro() {
         assert_eq!(covering_family("api/x", ["api", "api/*"]), Some("api/*"));
+    }
+}
+
+#[cfg(test)]
+mod bool_default_tests {
+    //! ⛔ **A declared `bool` default must actually reach the handler.**
+    //!
+    //! `bool` is the only parameter type whose *absence* is a usable value, so
+    //! `get_bool` answers `Ok(false)` for a missing parameter rather than `Err`.
+    //! Every other type reaches its declared default because the generated code is
+    //! `get_x(name).unwrap_or(default)` and `get_x` **errors** when the parameter is
+    //! missing — so for `bool` that `unwrap_or` unwrapped an `Ok(false)` and the
+    //! default was **dead code**.
+    //!
+    //! ⚠️ Measured in a consumer on 2026-09-04: a cancel route declaring
+    //! `at_period_end: bool = true`, and documenting the reversible at-period-end
+    //! form as its default, cancelled **immediately** whenever the client omitted the
+    //! parameter. Destructive direction, opposite of the documented promise, and
+    //! invisible because the route worked perfectly when the parameter *was* sent.
+    use super::*;
+
+    fn params(query: &[(&str, &str)]) -> ExtractedParams {
+        let mut q: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in query {
+            q.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        ExtractedParams {
+            path: HashMap::new(),
+            query: q,
+            body: None,
+            raw_body: Bytes::new(),
+        }
+    }
+
+    #[test]
+    fn an_absent_bool_is_distinguishable_from_an_explicit_false() {
+        let absent = params(&[]);
+        assert_eq!(
+            absent.get_bool_optional("flag").unwrap(),
+            None,
+            "absent must be None, or a declared default has nothing to fall back from"
+        );
+        assert_eq!(
+            params(&[("flag", "false")])
+                .get_bool_optional("flag")
+                .unwrap(),
+            Some(false),
+            "an explicit `false` is a VALUE, and must not be confused with absence — \
+             that conflation is the whole defect"
+        );
+        assert_eq!(
+            params(&[("flag", "true")])
+                .get_bool_optional("flag")
+                .unwrap(),
+            Some(true)
+        );
+
+        // ⭐ The generated shape, verbatim: this is what a `param: bool = true`
+        // declaration compiles to, and what silently yielded `false` before.
+        let d = true;
+        assert!(
+            absent.get_bool_optional("flag").unwrap().unwrap_or(d),
+            "⛔ a declared default of `true` must survive an omitted parameter"
+        );
+        assert!(
+            !params(&[("flag", "false")])
+                .get_bool_optional("flag")
+                .unwrap()
+                .unwrap_or(d),
+            "…and an explicit `false` must still override that default"
+        );
+    }
+
+    #[test]
+    fn a_bare_bool_still_reads_false_when_absent() {
+        // ⚖️ The half that must NOT change. A bare `param: bool` legitimately means
+        // "false unless asked for" — `confirm`, `dry_run`, `strict_policy` — and
+        // making absence an error would turn every one of those into a `400`.
+        assert!(!params(&[]).get_bool("confirm").unwrap());
+        assert!(params(&[("confirm", "1")]).get_bool("confirm").unwrap());
+        assert!(!params(&[("confirm", "0")]).get_bool("confirm").unwrap());
     }
 }

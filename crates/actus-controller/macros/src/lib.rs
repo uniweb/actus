@@ -909,9 +909,15 @@ fn generate_param_extraction(
         ("f64", None) => {
             quote! { extracted.get_f64(#name_str)? }
         }
+        // ⛔ `get_bool_optional`, NOT `get_bool`. Absence is `Ok(false)` for a bool — the
+        // one type whose "missing" is a usable value — so `get_bool(..).unwrap_or(d)`
+        // unwraps that `false` and the declared default is DEAD CODE. Every other
+        // type reaches its default because `require_scalar` errors on absence.
+        // Measured 2026-09-04: a cancel route declaring `at_period_end: bool = true`
+        // cancelled immediately when the client omitted the parameter.
         ("bool", Some(d)) => {
             quote! {
-                extracted.get_bool(#name_str).unwrap_or(#d)
+                extracted.get_bool_optional(#name_str)?.unwrap_or(#d)
             }
         }
         ("bool", None) => {
