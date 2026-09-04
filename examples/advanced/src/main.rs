@@ -1012,7 +1012,7 @@ mod tests {
     // ===== A declared `bool` default must survive the MACRO, not just the getter =====
     //
     // ⛔ The defect was in the code the macro EMITS, so a test that calls
-    // `ExtractedParams::get_bool_opt` directly — or hand-writes the
+    // `ExtractedParams::get_bool_optional` directly — or hand-writes the
     // `…unwrap_or(default)` shape — cannot catch a regression: revert the macro
     // arm and such a test still passes. (Measured 2026-09-04: reverting it left
     // all 18 suites green.) This one goes through `#[controller]` + `routes!`
