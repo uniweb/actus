@@ -1008,4 +1008,76 @@ mod tests {
         assert_eq!(me.prepare, Some("Self::auth"));
         assert_eq!(me.rate_limit_class, Some("auth"));
     }
+
+    // ===== A declared `bool` default must survive the MACRO, not just the getter =====
+    //
+    // ⛔ The defect was in the code the macro EMITS, so a test that calls
+    // `ExtractedParams::get_bool_opt` directly — or hand-writes the
+    // `…unwrap_or(default)` shape — cannot catch a regression: revert the macro
+    // arm and such a test still passes. (Measured 2026-09-04: reverting it left
+    // all 18 suites green.) This one goes through `#[controller]` + `routes!`
+    // and dispatches, so the generated code is what is under test.
+    //
+    // ⚠️ The assertion is the OMITTED parameter. Supplying it explicitly passes
+    // against the broken build, which is how this shipped unnoticed.
+
+    /// Captures what the handler actually received, so the assertion is about
+    /// the value that reached the handler body — not about a `Reply`'s encoding.
+    struct BoolDefault {
+        seen: Arc<Mutex<Option<bool>>>,
+    }
+
+    #[controller]
+    impl BoolDefault {
+        routes! {
+            GET "" => idx(at_period_end: bool = true),
+        }
+
+        async fn idx(&self, at_period_end: bool) -> Reply {
+            *self.seen.lock().unwrap() = Some(at_period_end);
+            reply!()
+        }
+    }
+
+    /// Dispatch `GET ""` with `query`, returning the value the handler saw.
+    async fn dispatched_with(query: &[(&str, &str)]) -> bool {
+        let seen = Arc::new(Mutex::new(None));
+        let controller = BoolDefault {
+            seen: Arc::clone(&seen),
+        };
+        let mut q: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in query {
+            q.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        let reply = controller
+            .actus_dispatch(
+                "",
+                Params::new(Verb::GET, q, None, Bytes::new(), HashMap::new()),
+            )
+            .await;
+        assert!(reply.is_ok(), "the handler must have run, not 400'd");
+        seen.lock().unwrap().expect("the handler ran")
+    }
+
+    #[tokio::test]
+    async fn a_declared_bool_default_reaches_the_handler_when_the_param_is_omitted() {
+        assert!(
+            dispatched_with(&[]).await,
+            "⛔ `at_period_end: bool = true` with the parameter OMITTED must reach the \
+             handler as `true`. Reading absence as `false` is the defect: a cancel route \
+             took the destructive, immediate branch the caller never asked for."
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_supplied_bool_still_overrides_its_default() {
+        // ⚖️ The control. The default must not become a floor — an explicit
+        // `false` is a VALUE and has to win. This half passed even when broken,
+        // which is exactly why it cannot be the only test.
+        assert!(!dispatched_with(&[("at_period_end", "false")]).await);
+        assert!(!dispatched_with(&[("at_period_end", "0")]).await);
+        assert!(dispatched_with(&[("at_period_end", "true")]).await);
+    }
 }
