@@ -10,6 +10,19 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Documentation
+
+- The README's `bool` example now shows `verbose: bool = false` as code, not
+  only in prose. The block previously demonstrated `= true` and the bare
+  (required) form, leaving the shape a reader actually needs — "optional,
+  `false` when omitted" — inferable but never shown. That is the line someone
+  copies after a bare `verbose: bool` 400s on them.
+
+- That example is now pinned by a test. README code blocks are not doctested
+  (no crate does `include_str!` of it), so nothing checked that the parameter
+  section's routes behaved as described — including its central claim that a
+  bare `bool` is a `400`.
+
 ## [1.5.0]
 
 ### Fixed

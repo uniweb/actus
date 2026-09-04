@@ -1080,4 +1080,87 @@ mod tests {
         assert!(!dispatched_with(&[("at_period_end", "0")]).await);
         assert!(dispatched_with(&[("at_period_end", "true")]).await);
     }
+
+    // ===== The README's parameter-extraction example, kept honest =====
+    //
+    // ⛔ README code blocks are NOT doctested — there is no `include_str!` of it
+    // in any crate, so nothing but this test stands between the example and a
+    // reader who copies it. It is the block a new user reaches for first, and
+    // the `bool` rule it teaches is the one that surprises people, so a stale
+    // example here costs more than most.
+    //
+    // Keep this in sync with README § Parameter extraction. If you change the
+    // routes there, change them here.
+
+    struct ReadmeParams;
+
+    #[controller]
+    impl ReadmeParams {
+        routes! {
+            GET  "search" => search(q: String, verbose: bool = false),
+            POST "cancel" => cancel(at_period_end: bool = true),
+            POST "delete" => delete(confirm: bool),
+        }
+
+        async fn search(&self, q: String, verbose: bool) -> Reply {
+            reply!(json!({ "q": q, "verbose": verbose }))
+        }
+        async fn cancel(&self, at_period_end: bool) -> Reply {
+            reply!(json!({ "at_period_end": at_period_end }))
+        }
+        async fn delete(&self, confirm: bool) -> Reply {
+            reply!(json!({ "confirm": confirm }))
+        }
+    }
+
+    fn readme_params(pairs: &[(&str, &str)], verb: Verb) -> Params {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in pairs {
+            m.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        Params::new(verb, m, None, Bytes::new(), HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn the_readme_parameter_example_behaves_as_it_claims() {
+        let c = ReadmeParams;
+
+        // "`?q=shoes` alone is fine; `verbose` arrives as `false`."
+        let r = c
+            .actus_dispatch("search", readme_params(&[("q", "shoes")], Verb::GET))
+            .await;
+        assert!(
+            r.is_ok(),
+            "a bool WITH a default must not make the route 400"
+        );
+
+        // "`?` omitted → `at_period_end` is `true`"
+        assert!(
+            c.actus_dispatch("cancel", readme_params(&[], Verb::POST))
+                .await
+                .is_ok()
+        );
+        // "an explicit `?at_period_end=false` still overrides it"
+        assert!(
+            c.actus_dispatch(
+                "cancel",
+                readme_params(&[("at_period_end", "false")], Verb::POST)
+            )
+            .await
+            .is_ok()
+        );
+
+        // "`POST /delete` with no `confirm` is a 400" — the surprising half, and
+        // the reason the section exists. If this ever passes, the README is lying.
+        let err = c
+            .actus_dispatch("delete", readme_params(&[], Verb::POST))
+            .await
+            .expect_err("a bare `bool` is required");
+        assert!(
+            matches!(&err, WebError::BadRequest(m) if m.contains("confirm")),
+            "expected a 400 naming `confirm`, got {err:?}"
+        );
+    }
 }

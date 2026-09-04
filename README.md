@@ -235,7 +235,7 @@ Parameters are extracted automatically from URL path segments, query strings, an
 | `i64` / `u64` | query or path      | `id: u64`                | required; 400 if missing or not parseable      |
 | `u32`         | query or path      | `page: u32 = 1`          | optional with default                          |
 | `f64`         | query              | `score: f64`             | required floating point                        |
-| `bool`        | query              | `verbose: bool` / `= false` | required; **not** falsy-when-absent (see below) |
+| `bool`        | query              | `verbose: bool = false`  | **required** when bare — not falsy-when-absent; `= false` makes it optional |
 | `Vec<String>` | query              | `tags: Vec<String>`      | all values of a repeated key (`?tags=a&tags=b` → `["a", "b"]`; `[]` if absent) |
 | `JsonValue`   | request body       | `data: JsonValue`        | parsed `serde_json::Value`                     |
 
@@ -247,14 +247,21 @@ Path parameters use `{name}` syntax in the route pattern and are always required
 
 ```rust
 routes! {
-    // required: omitting `confirm` is a 400
-    POST "delete"  => delete(confirm: bool),
-    // optional: omitting `at_period_end` yields `true`
-    POST "cancel"  => cancel(at_period_end: bool = true),
+    // Optional, `false` when omitted — what you almost always want.
+    // `?q=shoes` alone is fine; `verbose` arrives as `false`.
+    GET  "search" => search(q: String, verbose: bool = false),
+
+    // Optional with a `true` default. `?` omitted → `at_period_end` is `true`;
+    // an explicit `?at_period_end=false` still overrides it.
+    POST "cancel" => cancel(at_period_end: bool = true),
+
+    // Required. `POST /delete` with no `confirm` is a 400 — the caller has to
+    // state it either way. Rarely what you want; write `= false` if in doubt.
+    POST "delete" => delete(confirm: bool),
 }
 ```
 
-Two reasons it works this way. Exempting `bool` would leave **no way to declare a required one**. And an absent parameter and an explicit `?flag=false` are genuinely different requests — treating them alike would discard a distinction the wire carries.
+Why: an absent parameter and an explicit `?flag=false` are genuinely different requests, and reading absence as `false` would discard a distinction the wire carries — the same distinction `ExtractedParams::get_bool_optional` exposes. It also keeps a required `bool` expressible, though that is the rarer need.
 
 `Vec<String>` is the sole exemption, and a forced rather than chosen one: urlencoding cannot express "present but empty", so there is no required/optional distinction available to lose.
 
