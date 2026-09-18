@@ -37,6 +37,10 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ### Documentation
 
+- New guide, [`docs/guides/cache-control.md`](docs/guides/cache-control.md):
+  what a missing `Cache-Control` lets caches do, and the Actus pattern for a
+  per-controller default with per-route exceptions.
+
 - The README's `bool` example now shows `verbose: bool = false` as code, not
   only in prose. The block previously demonstrated `= true` and the bare
   (required) form, leaving the shape a reader actually needs — "optional,

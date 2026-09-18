@@ -486,7 +486,7 @@ The exceptions:
 - **CORS preflight (`204`)** — HTTP-protocol traffic, not an application request (see the CORS section).
 - **Pre-parse failures** — a request hyper itself can't parse never reaches the `Request` skeleton, so there's nothing to hand the hook.
 
-`after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.). To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter.
+`after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.). To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter. Header names are case-insensitive: `add_header` replaces a header of the same name in any letter case, and `response.header(name)` reads one back the same way — so a hook that sets a *default* checks `header(name).is_none()` first and leaves the handler's own choice standing. [`docs/guides/cache-control.md`](docs/guides/cache-control.md) works that pattern through for `Cache-Control`.
 
 ## Route families
 
@@ -959,6 +959,10 @@ impl Drop for Daemon {
 Tests boot a fresh `Daemon`, set up fixture data via direct library calls (faster than the HTTP API and scoped to one transaction), make real requests with `reqwest`, and let `Drop` reap the child. The whole pipeline — routing, auth, services, error mapping, the `Finalizer` — is exercised in the same shape it runs in production.
 
 On the daemon side, bind the listener yourself and print `local_addr()` before serving it with `Server::run_listener` (logs on stderr, so stdout carries only that line). **Do not** bind `127.0.0.1:0`, read the port, drop the listener and let the daemon re-bind: with tests running in parallel, another test's daemon can take the freed port in that gap — and because every daemon is the same binary, the request then lands on a *stranger's* server that answers plausibly. That is a silent flake, not a loud one; the in-process shape of it hit this repo's CI on 2026-08-31. The same rule for in-process tests: `run_with_shutdown_listener` takes the listener you already hold.
+
+### Cache-Control: a controller default, a route's exception
+
+Actus sets no `Cache-Control` of its own (SSE's `no-cache` aside) — which responses are private is application knowledge. The shape that fits: an `after` middleware reads the matched controller's declaration through `server.router()`, the `FloorGate` technique from [Route families](#route-families), and fills in a default only where the reply has none (`response.header("cache-control").is_none()`). A route that needs different caching sets the header on its own reply, and the default leaves it alone. [`docs/guides/cache-control.md`](docs/guides/cache-control.md) has the code, and what a missing header lets browsers and proxies do.
 
 ### Rate-limiting
 
