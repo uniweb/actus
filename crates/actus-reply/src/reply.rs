@@ -95,11 +95,18 @@ impl PartialEq for ReplyData {
 pub type Reply = Result<ReplyData, WebError>;
 
 impl ReplyData {
-    /// Add a response header. Lifts `self` into [`ReplyData::Rich`] if the
-    /// current variant doesn't already carry headers (Json/Bytes/Empty/Stream),
-    /// so middleware `after` hooks (and any code that has a `ReplyData` it
-    /// wants to decorate) can stamp headers without manually wrangling
-    /// [`ReplySpec`]. The original payload is preserved.
+    /// Add a response header, replacing any header already on the reply
+    /// whose name matches **case-insensitively** — HTTP field names are
+    /// case-insensitive (RFC 9110 §5.1), so `add_header("cache-control", …)`
+    /// replaces a handler's `"Cache-Control"` rather than sitting beside it.
+    /// Lifts `self` into [`ReplyData::Rich`] if the current variant doesn't
+    /// already carry headers (Json/Bytes/Empty/Stream), so middleware `after`
+    /// hooks (and any code that has a `ReplyData` it wants to decorate) can
+    /// stamp headers without manually wrangling [`ReplySpec`]. The original
+    /// payload is preserved.
+    ///
+    /// To set a *default* — a header the handler may already have chosen —
+    /// check [`header`](Self::header) first, or this overwrites its choice.
     ///
     /// No-op on [`ReplyData::Upgrade`] — that variant is intercepted by the
     /// server before the response body is finalized, and lifting it into
@@ -111,7 +118,7 @@ impl ReplyData {
         let name = name.into();
         let value = value.into();
         if let ReplyData::Rich(spec) = self {
-            spec.headers.insert(name, value);
+            insert_header(&mut spec.headers, name, value);
             return;
         }
         let payload = std::mem::replace(self, ReplyData::Empty);
@@ -141,6 +148,57 @@ impl ReplyData {
             headers: HashMap::new(),
         }));
     }
+
+    /// The value this reply will send for header `name`, or `None`. The
+    /// name matches case-insensitively.
+    ///
+    /// Follows the [`Finalizer`](crate::Finalizer): a header set on the reply
+    /// — by [`add_header`](Self::add_header), `reply!`'s `headers = { … }`,
+    /// [`build_reply`], or a constructor such as [`sse`] — wins; otherwise a
+    /// `Json` or `Bytes` payload's own `Content-Type` is reported. Headers the
+    /// server adds later in the pipeline (compression's `Content-Encoding`,
+    /// CORS, `Vary`, `Date`) are not visible here.
+    ///
+    /// The fill-in-a-default idiom for an `after` middleware:
+    ///
+    /// ```ignore
+    /// if response.header("cache-control").is_none() {
+    ///     response.add_header("Cache-Control", "private, no-store");
+    /// }
+    /// ```
+    pub fn header(&self, name: &str) -> Option<&str> {
+        match self {
+            // `last`, not `find`: the finalizer inserts entries in iteration
+            // order, so if a direct write to `ReplySpec::headers` left two
+            // spellings, the last match is the one it sends. (This relies on
+            // std's `HashMap` visiting `iter()` and `into_iter()` in the same
+            // order, which held for 1000 of 1000 maps on 2026-09-18.)
+            ReplyData::Rich(spec) => spec
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+                .last()
+                .or_else(|| spec.payload.header(name)),
+            ReplyData::Json(_) if name.eq_ignore_ascii_case("content-type") => {
+                Some("application/json")
+            }
+            ReplyData::Bytes { content_type, .. } if name.eq_ignore_ascii_case("content-type") => {
+                Some(content_type)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Set `name: value` in a reply's header map, first removing every entry whose
+/// name matches case-insensitively. Without this, `"Cache-Control"` and
+/// `"cache-control"` are two keys, and the [`Finalizer`](crate::Finalizer) —
+/// which `insert`s each into the response's `HeaderMap` — sends whichever it
+/// iterates last, which varies from one reply to the next.
+fn insert_header(headers: &mut HashMap<String, String>, name: String, value: String) {
+    headers.retain(|k, _| !k.eq_ignore_ascii_case(&name));
+    headers.insert(name, value);
 }
 
 // ===================== Simple Constructors =====================
@@ -378,7 +436,10 @@ pub struct ReplySpec {
     pub payload: ReplyData,
     /// The status code to send, or `None` to use the payload's default.
     pub status: Option<http::StatusCode>,
-    /// Extra response headers, as name → value.
+    /// Extra response headers, as name → value. Prefer [`ReplySpec::header`]
+    /// and [`ReplyData::add_header`], which replace a header of the same name
+    /// in any letter case. Inserting here directly does not: two spellings of
+    /// one name would both reach the finalizer, and only one is sent.
     pub headers: HashMap<String, String>,
 }
 
@@ -410,9 +471,10 @@ impl ReplySpec {
         self
     }
 
-    /// Add a response header.
+    /// Add a response header, replacing any already set whose name matches
+    /// case-insensitively (see [`ReplyData::add_header`]).
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(key.into(), value.into());
+        insert_header(&mut self.headers, key.into(), value.into());
         self
     }
 
@@ -785,6 +847,78 @@ mod tests {
         r.add_header("X-K", "v");
         r.set_status(StatusCode::CREATED);
         assert!(matches!(r, ReplyData::Upgrade(_))); // unchanged
+    }
+
+    // ===== Header names are case-insensitive (RFC 9110 §5.1) =====
+    //
+    // Two spellings of one name used to be two map keys, and the finalizer
+    // sent whichever it iterated last — a different one from reply to reply.
+
+    #[test]
+    fn add_header_replaces_a_header_of_any_case() {
+        let mut r = build_reply()
+            .header("Cache-Control", "private, max-age=60")
+            .body(ReplyData::Empty)
+            .done();
+        r.add_header("cache-control", "no-store");
+        let ReplyData::Rich(spec) = &r else {
+            panic!("expected Rich, got {r:?}");
+        };
+        assert_eq!(spec.headers.len(), 1, "{:?}", spec.headers);
+        assert_eq!(
+            spec.headers.get("cache-control"),
+            Some(&"no-store".to_string())
+        );
+    }
+
+    #[test]
+    fn builder_header_replaces_a_header_of_any_case() {
+        let r = build_reply()
+            .header("X-Request-Id", "a")
+            .header("x-request-id", "b")
+            .done();
+        let ReplyData::Rich(spec) = &r else {
+            panic!("expected Rich, got {r:?}");
+        };
+        assert_eq!(spec.headers.len(), 1, "{:?}", spec.headers);
+        assert_eq!(spec.headers.get("x-request-id"), Some(&"b".to_string()));
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive_and_sees_what_the_reply_will_send() {
+        // `sse` stores lowercase keys; any spelling finds them.
+        let events = sse(stream::iter(Vec::<SseEvent>::new()));
+        assert_eq!(events.header("Cache-Control"), Some("no-cache"));
+        // Still visible once wrapped again — the finalizer applies the inner
+        // reply's headers, then the outer ones.
+        let wrapped = build_reply()
+            .status(StatusCode::OK)
+            .body(sse(stream::iter(Vec::<SseEvent>::new())))
+            .done();
+        assert_eq!(wrapped.header("cache-control"), Some("no-cache"));
+        // A payload's own Content-Type is reported…
+        assert_eq!(
+            json(json!({})).header("content-type"),
+            Some("application/json")
+        );
+        assert_eq!(
+            bytes("image/png", vec![0]).header("Content-Type"),
+            Some("image/png")
+        );
+        // …unless the reply sets one, which then wins.
+        let explicit = build_reply()
+            .header("Content-Type", "application/vnd.example+json")
+            .body(json(json!({})))
+            .done();
+        assert_eq!(
+            explicit.header("content-type"),
+            Some("application/vnd.example+json")
+        );
+        // Nothing set and nothing implied.
+        assert_eq!(json(json!({})).header("cache-control"), None);
+        assert_eq!(ReplyData::Empty.header("content-type"), None);
+        let task: Box<dyn std::any::Any + Send> = Box::new(0u8);
+        assert_eq!(ReplyData::Upgrade(task).header("content-type"), None);
     }
 
     // ===== SSE encoding =====

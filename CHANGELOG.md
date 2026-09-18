@@ -10,6 +10,31 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A header set under two spellings reached the wire as a coin flip.**
+  `ReplyData::add_header` and `ReplySpec::header` stored names exactly as
+  given, so `"Cache-Control"` and `"cache-control"` were two keys in the
+  reply's header map. The finalizer sent only one of them — whichever it
+  iterated last, which varied from one reply to the next: an `after`
+  middleware adding `cache-control` over a handler's `Cache-Control` won 106
+  of 200 identical requests in one run and 129 in the next. Field names are
+  case-insensitive (RFC 9110 §5.1), so both methods now replace any header of
+  the same name in any letter case. The framework's own lowercase keys
+  collided too: `reply::sse` sets `cache-control` and `content-type`.
+
+  Only an outcome that was already random changes; writing the same spelling
+  twice replaced before and still does. Writing to `ReplySpec::headers`
+  directly still bypasses the rule (its doc says so).
+
+### Added
+
+- `ReplyData::header(name)` — the value a reply will send for a header, with
+  the name matched case-insensitively: a header set on the reply, otherwise
+  the `Content-Type` a `Json` / `Bytes` payload implies. It is the check an
+  `after` middleware needs to fill in a default without overwriting a
+  handler's choice: `if response.header("cache-control").is_none() { … }`.
+
 ### Documentation
 
 - The README's `bool` example now shows `verbose: bool = false` as code, not

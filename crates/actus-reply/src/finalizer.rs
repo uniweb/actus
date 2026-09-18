@@ -321,6 +321,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_header_set_under_two_spellings_is_sent_once_with_the_last_value() {
+        // Field names are case-insensitive (RFC 9110 §5.1). Both spellings
+        // used to stay in the map, and which one was sent depended on
+        // `HashMap` iteration order.
+        let mut reply = crate::reply::build_reply()
+            .header("Cache-Control", "private, max-age=60")
+            .body(ReplyData::Json(serde_json::json!({})))
+            .done();
+        reply.add_header("cache-control", "no-store");
+        // `header()` reports what is about to be sent: the added header, and
+        // the Content-Type the JSON payload implies.
+        assert_eq!(reply.header("Cache-Control"), Some("no-store"));
+        assert_eq!(reply.header("Content-Type"), Some("application/json"));
+
+        let res = Finalizer::new().build_response(reply).await;
+        let sent: Vec<&str> = res
+            .headers()
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(sent, ["no-store"]);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
     async fn build_rich_response_drops_invalid_headers_without_panicking() {
         use crate::reply::ReplySpec;
         use std::collections::HashMap;
