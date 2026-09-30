@@ -814,6 +814,46 @@ app_routes! {
 
 No regex, no rewrite rules — the legacy paths sit alongside modern routes.
 
+## Host aliases
+
+A `hosts` block in `app_routes!` makes a host a name for a mounted controller:
+
+```rust
+app_routes! {
+    hosts {
+        "{tenant}.example.com" => "tenants/{tenant}" shares ["assets"],
+    }
+    routes {
+        "tenants" => TenantController { db },   // routes! { GET "{tenant}/orders/{id}" => … }
+        "assets"  => AssetController,
+        "api"     => ApiController { db },
+        "*"       => SpaController,
+    }
+}
+```
+
+A request on `acme.example.com` for `/orders/7` is routed exactly as the request for `/tenants/acme/orders/7`: the host's `{tenant}` label becomes the first segment of the controller's action, and `TenantController`'s own routes take it from there — typed parameters, verb rules, body cap, rate-limit class and floor included. Once it reaches the controller, it is regular routing.
+
+- **What an aliased host reaches.** The aliased mount, and the mounts it `shares`, which keep their own paths: `/assets/app.js` on `acme.example.com` is the app's `/assets/app.js`. Every other path goes under the alias — `/api/users` there is `tenants/acme/api/users` — so neither `ApiController` nor the root catch-all is reachable from a tenant's host. A host no alias names is routed exactly as without a `hosts` block.
+- **Matching.** A pattern is dot-separated labels, each literal or a `{name}` capture; a capture matches one label of letters, digits and hyphens, and arrives lowercased. The port, ASCII case and a trailing dot are ignored, and an absolute-form request's authority is used instead of `Host` (RFC 9112 §3.2.2). The first alias that names the host wins, in declaration order, so an exact host listed before a pattern carves itself out of it.
+- **Configuration.** The host side is any expression evaluated in `init()`: a pattern, or an `Option` of one. `None` registers nothing — a deployment that does not configure the alias has none, and pays nothing for it: with no aliases, the server does not read `Host` at all.
+
+  ```rust
+  app_routes! {
+      deps(tenant_host: Option<String>) {}   // e.g. Some("{tenant}.example.com"), from configuration
+      hosts { tenant_host => "tenants/{tenant}" shares ["assets"] }
+      routes { /* … */ }
+  }
+  ```
+
+- **Checked at startup.** `init()` fails, naming the entry, if the host pattern is malformed, if the target or a shared mount is not exactly a mounted controller, if the host's captures and the target's `{name}` segments do not line up, or if a shared mount contains the aliased one. Exact mounts are what keep every aliased path inside the alias: a misspelled path would otherwise fall through to a shallower mount — a root catch-all — and reach what the alias exists to confine. The paths are checked even when the host side is `None`, so a typo fails every deployment, not only the ones that configure the host.
+
+**One address.** The server applies an alias before anything else sees the request, so `Request::path_parts` holds the aliased path — `["tenants", "acme", "orders", "7"]` — for the router, every middleware and the handler alike, while `Host` still names the host. A middleware that finds the matched controller with `router.match_controller(&request.path_parts)` — the gate in [Route families](#route-families), the default in the [Cache-Control guide](docs/guides/cache-control.md) — gets the one the server dispatched to, unchanged. And because an aliased request is identical, apart from `Host`, to a request any client could send to the aliased path directly, every middleware decision that does not read `Host` comes out the same: **an alias adds addresses, never capabilities.**
+
+**Knowing you were aliased.** A handler that must behave differently on an aliased host — root-relative links on the tenant's own host, prefixed ones under `/tenants/acme` — asks the router rather than matching `Host` a second time: `params.alias_prefix()` is `Some("tenants/acme")` when an alias routed the request, and `None` when it was routed by its own path, including a shared mount reached on a tenant's host. One rule, applied once, so the handler and the router cannot disagree.
+
+Deliberately not covered: mapping hosts from data. Custom domains need a lookup, which is application logic, and a pattern cannot express it.
+
 ## Patterns
 
 These aren't framework features — they're shapes that came up while wiring actus into a real backend and turned out to be worth recording. Each is a few lines of glue that you write once in your own crate; subsequent controllers stay short.
@@ -1136,6 +1176,7 @@ What's there today:
 - **`app_routes!`** with `deps` and per-route service injection (auto-clone of struct-literal shorthand, bare-ident `target: source` form, and `..base`).
 - **`#[controller]` + `routes!`** with HTTP verbs, path patterns, type-safe query/body extraction, defaults, strict/lax modes, the `prepare = ...` hook (returns `Ok(None)`, a custom early-return reply, or an error), and per-controller knobs `#[controller(max_body_bytes = …)]` / `#[controller(rate_limit = "class")]` / `#[controller(expects = "floor")]`. Actus is **policy-agnostic** — authorization lives in your application's policy layer, called from the prepare hook and/or handlers.
 - **Route families** — `#[controller(expects = "…")]` declares the least-privileged caller a controller accepts (a floor; an opaque label the framework never interprets); `Router::mounts()` returns the per-mount inventory — floor, `prepare` presence, rate-limit class, body cap, one row per mounted controller, **absences included** — for a startup coverage check that turns a silently-undeclared controller into a boot failure; `Server::router()` shares the route tree so a middleware gate can key on the declaration via the framework's own matcher; and a `families { "api" => ["credential", "anonymous"] }` block in `app_routes!` makes a missing or unaccepted declaration a **compile error**. Coverage, not authorization — see [Route families](#route-families).
+- **Host aliases** — a `hosts { … }` block in `app_routes!` makes a host a name for a mounted controller (`{tenant}.example.com` → `tenants/{tenant}`, plus shared mounts at their own paths); the aliased request is routed, and seen by every middleware, as the path it names. No host work at all without one. See [Host aliases](#host-aliases).
 - **Per-request state carry**: `prepare` hooks stash typed values via `params.insert::<T>(value)`; handlers read them by declaring `params: &Params` and calling `params.get::<T>()`.
 - **Longest-prefix routing** at arbitrary depth, with multi-segment patterns inside controllers and a trailing `{...rest}` catch-all path parameter.
 - **Query as a multimap** — repeated keys accumulate; `Vec<String>` params get all values; `params.query()` for "catch the rest". Form-urlencoded bodies fold into the same map.
