@@ -11,6 +11,7 @@
 pub mod compression;
 pub mod cors;
 pub mod error;
+pub mod host;
 pub mod middleware;
 #[cfg(feature = "openapi")]
 pub mod openapi;
@@ -24,6 +25,7 @@ pub mod websocket;
 pub use compression::CompressionLayer;
 pub use cors::CorsLayer;
 pub use error::ServerError;
+pub use host::HostAliasError;
 pub use middleware::{Middleware, MiddlewareChain, Outcome, RequestLogger};
 pub use request::Request;
 pub use router::{Mount, RateLimitClass, Router, RouterBuilder};

@@ -962,6 +962,13 @@ fn generate_param_extraction(
 //             "health"       => HealthController,
 //             "*"            => SpaController,
 //         }
+//         // Optional. Host aliases: `<host expr> => "<mount>/{capture}…"`,
+//         // optionally followed by `shares ["<mount>", …]`. The host side is
+//         // any expression giving a pattern (`&str` / `String`) or an
+//         // `Option` of one (`None`: no alias in this deployment).
+//         hosts {
+//             "{tenant}.example.com" => "api/entities/{tenant}" shares ["api/cache"],
+//         }
 //     }
 //
 // Generates `pub async fn init(<inputs>) -> actus::InitResult<actus::Router>`,
@@ -988,6 +995,19 @@ struct AppRoutesInput {
     /// controllers must declare `expects`, each optionally with the floors the
     /// family accepts. Empty when the block is absent.
     families: Vec<FamilyDecl>,
+    /// `hosts { <expr> => "<target>" shares [..], … }` — host aliases, in
+    /// declaration order. Empty when the block is absent.
+    hosts: Vec<HostDecl>,
+}
+
+/// One `hosts` entry. Checked by `RouterBuilder::host_alias` when `init()`
+/// runs, not here: the host side may be configuration, and one checker is
+/// better than two that must agree.
+struct HostDecl {
+    /// A pattern (`&str` / `String`), or an `Option` of one.
+    host: Expr,
+    target: LitStr,
+    shares: Vec<LitStr>,
 }
 
 struct FamilyDecl {
@@ -1017,6 +1037,7 @@ impl Parse for AppRoutesInput {
         let mut deps: Vec<DepBinding> = Vec::new();
         let mut routes: Option<Vec<RouteBinding>> = None;
         let mut families: Vec<FamilyDecl> = Vec::new();
+        let mut hosts: Vec<HostDecl> = Vec::new();
 
         while !input.is_empty() {
             let kw: Ident = input.parse()?;
@@ -1081,6 +1102,39 @@ impl Parse for AppRoutesInput {
                         }
                     }
                 }
+                "hosts" => {
+                    // `hosts { <expr> => "<target>" shares ["…"], … }`
+                    let content;
+                    syn::braced!(content in input);
+                    while !content.is_empty() {
+                        let host: Expr = content.parse()?;
+                        content.parse::<Token![=>]>()?;
+                        let target: LitStr = content.parse()?;
+                        let mut shares = Vec::new();
+                        if content.peek(Ident) {
+                            let kw: Ident = content.parse()?;
+                            if kw != "shares" {
+                                return Err(syn::Error::new(
+                                    kw.span(),
+                                    "expected `shares [\"<mount>\", …]` or `,` after a host alias's target",
+                                ));
+                            }
+                            let list;
+                            syn::bracketed!(list in content);
+                            let items: Punctuated<LitStr, Token![,]> =
+                                Punctuated::parse_terminated(&list)?;
+                            shares = items.into_iter().collect();
+                        }
+                        hosts.push(HostDecl {
+                            host,
+                            target,
+                            shares,
+                        });
+                        if !content.is_empty() {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
                 "routes" => {
                     let content;
                     syn::braced!(content in input);
@@ -1099,7 +1153,10 @@ impl Parse for AppRoutesInput {
                 other => {
                     return Err(syn::Error::new(
                         kw.span(),
-                        format!("expected 'deps', 'families' or 'routes', got '{}'", other),
+                        format!(
+                            "expected 'deps', 'families', 'hosts' or 'routes', got '{}'",
+                            other
+                        ),
                     ));
                 }
             }
@@ -1117,6 +1174,7 @@ impl Parse for AppRoutesInput {
             deps,
             routes,
             families,
+            hosts,
         })
     }
 }
@@ -1148,8 +1206,11 @@ fn mount_segments(path: &str) -> Vec<String> {
 /// and `let`-bindings shared across controllers — and a `routes { mount =>
 /// Controller … }` map. Expands to an async `init(…)` returning the built
 /// `Router`: it constructs every controller, wires its dependencies, and
-/// registers each mount. See the `actus` crate's top-level docs for a worked
-/// example.
+/// registers each mount. An optional `families { … }` block makes caller
+/// declarations a compile-time requirement under listed prefixes, and an
+/// optional `hosts { … }` block registers host aliases — checked when `init()`
+/// runs, which returns the error for a bad entry. See the `actus` crate's
+/// top-level docs for worked examples.
 #[proc_macro]
 pub fn app_routes(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as AppRoutesInput);
@@ -1246,6 +1307,21 @@ fn generate_app_routes(parsed: AppRoutesInput) -> proc_macro2::TokenStream {
         }
     });
 
+    // Host aliases, after every route: `host_alias` checks its target and
+    // shared mounts against the mounts already added.
+    let host_calls = parsed.hosts.iter().map(|h| {
+        let host = &h.host;
+        let target = &h.target;
+        let shares = &h.shares;
+        quote! {
+            .host_alias(
+                ::actus::__internal::AliasHost::alias_host(&(#host)),
+                #target,
+                &[ #(#shares),* ],
+            )?
+        }
+    });
+
     quote! {
         pub async fn init(#(#init_params),*) -> ::actus::InitResult<::actus::Router> {
             #(#family_types)*
@@ -1253,6 +1329,7 @@ fn generate_app_routes(parsed: AppRoutesInput) -> proc_macro2::TokenStream {
 
             let router = ::actus::RouterBuilder::new()
                 #(#route_calls)*
+                #(#host_calls)*
                 .build();
 
             ::std::result::Result::Ok(router)

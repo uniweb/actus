@@ -302,6 +302,28 @@ impl Params {
             .and_then(|b| b.downcast_ref::<T>())
     }
 
+    /// When a host alias routed this request: the path the alias put in front
+    /// of the request's own path — the aliased mount and the host's captured
+    /// labels, e.g. `"tenants/acme"`. `None` when the request was routed by
+    /// its own path, including a shared mount reached on an aliased host.
+    ///
+    /// This is the router's own answer to "did this request arrive on an
+    /// aliased host?". A handler that must behave differently there — say,
+    /// root-relative links on the tenant's own host, prefixed ones under the
+    /// mount — reads it here instead of matching `Host` a second time, so the
+    /// handler and the router cannot disagree. (See `RouterBuilder::host_alias`
+    /// in `actus-server`, and the README's "Host aliases" section.)
+    pub fn alias_prefix(&self) -> Option<&str> {
+        self.get::<AliasPrefix>().map(|p| p.0.as_str())
+    }
+
+    /// Record that a host alias routed this request under `prefix` — what
+    /// [`Params::alias_prefix`] then reports. The server calls this; it is
+    /// public so a test can build the `Params` an aliased request carries.
+    pub fn set_alias_prefix(&mut self, prefix: impl Into<String>) {
+        self.insert(AliasPrefix(prefix.into()));
+    }
+
     /// The HTTP verb this request was dispatched with.
     pub fn verb(&self) -> Verb {
         self.verb
@@ -479,6 +501,12 @@ impl Params {
         }
     }
 }
+
+/// The prefix a host alias put in front of a request's path — held in the
+/// `Params` extensions under a type nothing outside this crate can name, so a
+/// request no alias touched carries nothing at all. Read with
+/// [`Params::alias_prefix`].
+struct AliasPrefix(String);
 
 // =========================
 // Extracted parameters (after route resolution)
@@ -1142,6 +1170,44 @@ pub fn declares_expectation_in<F: Family, T: Controller + DeclaresExpectation>(c
         )
     };
     c
+}
+
+// =========================
+// Host aliases — macro plumbing
+// =========================
+
+/// The host side of a `hosts` entry in `app_routes!` — a pattern (`&str`,
+/// `String`), or an `Option` of one where `None` means the alias does not
+/// exist in this deployment — as the `Option<&str>` that
+/// `RouterBuilder::host_alias` takes. Used by the macro; not meant to be named.
+#[doc(hidden)]
+pub trait AliasHost {
+    /// The pattern, or `None` for an alias that is not configured.
+    fn alias_host(&self) -> Option<&str>;
+}
+
+impl AliasHost for str {
+    fn alias_host(&self) -> Option<&str> {
+        Some(self)
+    }
+}
+
+impl AliasHost for String {
+    fn alias_host(&self) -> Option<&str> {
+        Some(self)
+    }
+}
+
+impl<T: AliasHost + ?Sized> AliasHost for &T {
+    fn alias_host(&self) -> Option<&str> {
+        (**self).alias_host()
+    }
+}
+
+impl<T: AliasHost> AliasHost for Option<T> {
+    fn alias_host(&self) -> Option<&str> {
+        self.as_ref().and_then(|h| h.alias_host())
+    }
 }
 
 /// A list of `(mount, controller-factory)` pairs — the route-registration

@@ -138,6 +138,9 @@
 //!   lets a middleware gate on the declaration; and a `families { … }` block
 //!   in `app_routes!` makes a missing or unaccepted declaration a **compile
 //!   error** — see below.
+//! - **Host aliases** — a `hosts { … }` block in `app_routes!` makes a host
+//!   a name for a mounted controller (`{tenant}.example.com` →
+//!   `tenants/{tenant}`); see below.
 //!
 //! # Route families at compile time
 //!
@@ -290,6 +293,86 @@
 //! }
 //! ```
 //!
+//! # Host aliases
+//!
+//! A `hosts` block makes a host a name for a mounted controller. A request on
+//! `acme.example.com` for `/orders/7` is routed as the request for
+//! `/tenants/acme/orders/7`: the host's `{tenant}` label becomes the first
+//! segment of the controller's action, and the controller's own routes take
+//! it from there. On an aliased host only the aliased mount and the mounts it
+//! `shares` — which keep their own paths — are reachable; every other host is
+//! routed as before. A handler learns that an alias routed its request from
+//! [`Params::alias_prefix`](prelude::Params::alias_prefix).
+//!
+//! ```
+//! use actus::prelude::*;
+//!
+//! struct Tenants;
+//! #[controller]
+//! impl Tenants {
+//!     routes! { GET "{tenant}/orders/{id}" => order(tenant: String, id: u64) }
+//!     async fn order(&self, tenant: String, id: u64) -> Reply {
+//!         reply!(serde_json::json!({ "tenant": tenant, "order": id }))
+//!     }
+//! }
+//!
+//! struct Assets;
+//! #[controller]
+//! impl Assets {
+//!     routes! { GET "{...path}" => file(path: String) }
+//!     async fn file(&self, path: String) -> Reply { reply!(path) }
+//! }
+//!
+//! app_routes! {
+//!     hosts {
+//!         "{tenant}.example.com" => "tenants/{tenant}" shares ["assets"],
+//!     }
+//!     routes {
+//!         "tenants" => Tenants,
+//!         "assets"  => Assets,
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     init().await.expect("the target and the shared mount are both mounted");
+//! }
+//! ```
+//!
+//! The host side is any expression evaluated in `init()`: a pattern, or an
+//! `Option` of one. `None` registers nothing — that deployment has no alias,
+//! and the server does not read `Host` at all. The paths are checked either
+//! way, when `init()` runs: a target or shared mount that is not exactly a
+//! mounted controller fails it, naming the entry.
+//!
+//! ```
+//! use actus::prelude::*;
+//!
+//! struct Tenants;
+//! #[controller]
+//! impl Tenants {
+//!     routes! { GET "{tenant}" => home(tenant: String) }
+//!     async fn home(&self, tenant: String) -> Reply { reply!(tenant) }
+//! }
+//!
+//! app_routes! {
+//!     deps(tenant_host: Option<String>) {}
+//!     hosts {
+//!         tenant_host => "tenant/{tenant}",   // typo: the mount is `tenants`
+//!     }
+//!     routes { "tenants" => Tenants }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // Unconfigured or not, the typo fails startup, naming the entry.
+//!     for host in [None, Some("{tenant}.example.com".to_string())] {
+//!         let err = init(host).await.err().expect("`tenant` is not a mount");
+//!         assert!(err.to_string().contains("`tenant` is not a mounted controller"), "{err}");
+//!     }
+//! }
+//! ```
+//!
 //! See the [`prelude`] for the common imports, and the [repository] for the
 //! full guide — philosophy, framework comparisons, and the `examples/`
 //! directory with auth, typed bodies, CORS, compression, WebSockets, SSE, and
@@ -307,7 +390,9 @@ pub use actus_reply::Finalizer;
 // Re-exported at the crate root so the `app_routes!` macro can resolve
 // `::actus::Router` / `::actus::RouterBuilder` from generated code without
 // requiring downstream crates to depend on `actus-server` directly.
-pub use actus_server::{GIB, KIB, MIB, Mount, RateLimitClass, Router, RouterBuilder, Server};
+pub use actus_server::{
+    GIB, HostAliasError, KIB, MIB, Mount, RateLimitClass, Router, RouterBuilder, Server,
+};
 
 /// Route-resolution helpers, exposed for tools and boot-time checks —
 /// notably [`routing::covering_family`], the rule the `families` block of

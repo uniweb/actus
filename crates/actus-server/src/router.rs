@@ -1,8 +1,10 @@
 //! [`Router`] and [`RouterBuilder`] — the longest-prefix route tree that maps
 //! a request path to the controller mounted at its deepest matching prefix.
 
+use crate::host::{AliasHit, HostAlias, HostAliasError, request_host};
 use actus_controller::{Controller, Params, RouteDef};
 use actus_reply::{Reply, WebError};
+use http::{HeaderMap, Uri};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -86,6 +88,8 @@ pub struct Mount {
 /// match over the route tree at arbitrary depth.
 pub struct Router {
     root: RouteNode,
+    /// Host aliases, in declaration order — see [`RouterBuilder::host_alias`].
+    aliases: Vec<HostAlias>,
 }
 
 impl Router {
@@ -97,6 +101,13 @@ impl Router {
     /// dispatch to, or 405 if none match the verb) happens inside the
     /// controller's `actus_dispatch`; this method only does the
     /// path-tree walk.
+    ///
+    /// This is the server's own matcher: called with a request's
+    /// [`path_parts`](crate::Request::path_parts) — from a `Middleware`, say —
+    /// it returns the controller the server dispatches that request to. That
+    /// holds for a request a host alias routed, too, because the server puts
+    /// the aliased path in `path_parts` before anything else sees the request
+    /// (see [`RouterBuilder::host_alias`]).
     pub fn match_controller(&self, path_parts: &[String]) -> Option<RouteMatch> {
         let mut current_node = &self.root;
         // (controller, prefix_len) — `prefix_len` is how many leading path
@@ -268,6 +279,22 @@ impl Router {
         out
     }
 
+    /// Whether any host alias is registered. When none is, the server does no
+    /// host work at all — it does not even read `Host`.
+    #[inline]
+    pub(crate) fn has_host_aliases(&self) -> bool {
+        !self.aliases.is_empty()
+    }
+
+    /// The first alias, in declaration order, that names the host this
+    /// request is addressed to — read from the hyper request's URI and
+    /// headers, because an absolute-form request's authority lives in the URI,
+    /// which the `Request` skeleton does not keep.
+    pub(crate) fn host_alias_hit(&self, uri: &Uri, headers: &HeaderMap) -> Option<AliasHit<'_>> {
+        let host = request_host(uri, headers)?;
+        self.aliases.iter().find_map(|alias| alias.hit(host))
+    }
+
     fn walk_mounts(node: &RouteNode, prefix: &mut Vec<String>, out: &mut Vec<Mount>) {
         if let Some(controller) = &node.controller {
             out.push(Mount {
@@ -293,6 +320,7 @@ impl Router {
 #[derive(Default)]
 pub struct RouterBuilder {
     root: RouteNode,
+    aliases: Vec<HostAlias>,
 }
 
 impl RouterBuilder {
@@ -357,9 +385,81 @@ impl RouterBuilder {
         self
     }
 
+    /// Make a host a name for a mounted controller — a **host alias**.
+    ///
+    /// A request whose host `host` names is routed as the request for
+    /// `target` followed by the request's own path: on `acme.example.com`,
+    /// with `host` `"{tenant}.example.com"` and `target`
+    /// `"tenants/{tenant}"`, `GET /orders/7` is routed as
+    /// `GET /tenants/acme/orders/7`. The controller mounted at `tenants`
+    /// receives the action `acme/orders/7`, and its own routes, typed
+    /// parameters, verb rules, body cap, rate-limit class and floor apply as
+    /// for any request. Once it reaches the controller, it is regular routing.
+    ///
+    /// - **`host`** — dot-separated labels, each a literal hostname label or a
+    ///   `{name}` capture. Matching ignores ASCII case, the port and a trailing
+    ///   dot, and reads an absolute-form request's authority in preference to
+    ///   `Host` (RFC 9112 §3.2.2). A capture matches exactly one label of
+    ///   letters, digits and hyphens, and is filled in lowercase. `None` means
+    ///   the alias does not exist in this deployment: the entry is still
+    ///   checked, but nothing is registered.
+    /// - **`target`** — a mounted controller's path, then one `{name}` segment
+    ///   per capture of `host`. It must name a mount exactly, so every aliased
+    ///   path reaches that controller.
+    /// - **`shares`** — other mounts that keep their own paths on the aliased
+    ///   host (`/assets/app.js` there is the app's `/assets/app.js`). Each must
+    ///   be exactly a mount, and none may contain the aliased one.
+    ///
+    /// On an aliased host nothing else is reachable: every path outside the
+    /// shared mounts goes under `target`. Aliases are tried in the order they
+    /// were added and the first that names the host wins; a host that none
+    /// names is routed exactly as without aliases.
+    ///
+    /// **One address.** The server applies the alias before anything else
+    /// sees the request, so [`Request::path_parts`](crate::Request::path_parts)
+    /// holds the aliased path (`tenants/acme/orders/7`) for the router, for
+    /// every middleware and for the handler alike, and `Host` still names the
+    /// host. A handler learns that an alias routed its request, and under
+    /// which prefix, from `Params::alias_prefix`. An aliased request is
+    /// identical, apart from `Host`, to a request any client could send to the
+    /// aliased path directly: an alias adds addresses, never capabilities.
+    ///
+    /// Add the routes first: `target` and `shares` are checked against the
+    /// mounts present when this is called. The `hosts` block of `app_routes!`
+    /// generates these calls after its routes and returns the error from
+    /// `init()`.
+    pub fn host_alias(
+        mut self,
+        host: Option<&str>,
+        target: &str,
+        shares: &[&str],
+    ) -> Result<Self, HostAliasError> {
+        let root = &self.root;
+        let alias = HostAlias::new(host, target, shares, |segments| {
+            Self::is_mount(root, segments)
+        })?;
+        self.aliases.extend(alias);
+        Ok(self)
+    }
+
+    /// Whether a controller is mounted at exactly `segments`.
+    fn is_mount(root: &RouteNode, segments: &[String]) -> bool {
+        let mut node = root;
+        for segment in segments {
+            match node.children.get(segment) {
+                Some(child) => node = child,
+                None => return false,
+            }
+        }
+        node.controller.is_some()
+    }
+
     /// Finalize the builder into an immutable [`Router`].
     pub fn build(self) -> Router {
-        Router { root: self.root }
+        Router {
+            root: self.root,
+            aliases: self.aliases,
+        }
     }
 }
 

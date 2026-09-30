@@ -10,6 +10,45 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **Host aliases** — a `hosts { … }` block in `app_routes!`, with
+  `RouterBuilder::host_alias` underneath it, makes a host a name for a
+  mounted controller. `"{tenant}.example.com" => "tenants/{tenant}" shares
+  ["assets"]` routes `GET /orders/7` on `acme.example.com` exactly as
+  `GET /tenants/acme/orders/7`: the host's label becomes the first segment of
+  the controller's action, and the controller's own routes, typed parameters,
+  verb rules, body cap and floor apply. On an aliased host only the aliased
+  mount and the shared mounts — at their own paths — are reachable; a host no
+  alias names is routed exactly as before. Matching ignores the port, ASCII
+  case and a trailing dot, and uses an absolute-form request's authority over
+  `Host`. The host side may be an `Option`, and `None` means the alias does
+  not exist in that deployment. `init()` fails, naming the entry, on a
+  malformed pattern or when a target or shared mount is not exactly a mounted
+  controller.
+
+  The alias is applied before anything else sees the request, so
+  `Request::path_parts` holds the aliased path for the router, every
+  middleware and the handler: `router.match_controller(&request.path_parts)`
+  in a middleware keeps returning the controller the server dispatched to. An
+  aliased request is identical, apart from `Host`, to one any client could
+  send to the aliased path directly — an alias adds addresses, never
+  capabilities. Without a `hosts` block the server does no host work at all;
+  it does not read `Host`.
+
+- `Params::alias_prefix()` — `Some("tenants/acme")` when a host alias routed
+  the request, `None` otherwise: the router's answer to "did this arrive on an
+  aliased host?", so a handler never has to match `Host` a second time.
+  `Params::set_alias_prefix` records it; the server calls it, and it is public
+  so a test can build the `Params` an aliased request carries.
+
+- `HostAliasError`, returned by `RouterBuilder::host_alias` (and re-exported
+  as `actus::HostAliasError`).
+
+### Documentation
+
+- README § "Host aliases".
+
 ## [1.6.0]
 
 ### Fixed

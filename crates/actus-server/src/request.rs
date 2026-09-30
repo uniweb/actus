@@ -20,6 +20,14 @@ pub struct Request {
     pub method: http::Method,
     /// The request path split on `/` into non-empty segments (no leading
     /// empty segment); e.g. `/api/users` → `["api", "users"]`.
+    ///
+    /// On a request a host alias routed, this is the **aliased** path — the
+    /// alias's target with the host's labels filled in, then the path the
+    /// client sent (`["tenants", "acme", "orders", "7"]` for `GET /orders/7`
+    /// on `acme.example.com`) — and the `Host` header still names the host.
+    /// The server sets it before routing and before any middleware runs, so
+    /// every reader sees the path the router matched (see
+    /// `RouterBuilder::host_alias`).
     pub path_parts: Vec<String>,
     /// Query parameters as a multimap (each name → all its values, in order).
     /// `application/x-www-form-urlencoded` body fields are appended into the

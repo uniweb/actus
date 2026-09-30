@@ -127,6 +127,8 @@ impl Server {
     /// The clone is an `Arc` clone; a gate's extra `match_controller` call is
     /// one map lookup per path segment on top of the one the server already
     /// does. See the README's "Route families" section for the full pattern.
+    /// A request routed by a host alias needs nothing extra: its `path_parts`
+    /// already hold the aliased path by the time any middleware runs.
     pub fn router(&self) -> Arc<Router> {
         Arc::clone(&self.router)
     }
@@ -731,7 +733,8 @@ impl Server {
     /// **Lifecycle order:**
     ///
     /// 1. capture WS upgrade (if request looks like a handshake)
-    /// 2. build the `Request` skeleton (no body yet)
+    /// 2. build the `Request` skeleton (no body yet) — and, when the router
+    ///    has host aliases, route an aliased request as the path it names
     /// 3. CORS preflight short-circuit (uses headers only)
     /// 4. match controller — 404 short-circuits *without* buffering the
     ///    body (efficiency win on adversarial bad-path requests); then stamp
@@ -768,7 +771,24 @@ impl Server {
 
             // 2. Build the skeleton (method / path / query / headers); the
             //    body stream is held aside for step 5.
-            let (mut request, body_stream) = Request::from_hyper_parts(req);
+            //
+            //    A host alias is applied here, before anything else sees the
+            //    request: from now on, for the router, every middleware and
+            //    the handler, it *is* the request for the aliased path. With
+            //    no aliases registered this is the only host work there is —
+            //    one check; `Host` is not even read. The host is read before
+            //    the skeleton takes the request, because an absolute-form
+            //    request's authority is in the URI, which the skeleton does
+            //    not keep.
+            let (mut request, body_stream, alias_prefix) = if self.router.has_host_aliases() {
+                let hit = self.router.host_alias_hit(req.uri(), req.headers());
+                let (mut request, body_stream) = Request::from_hyper_parts(req);
+                let alias_prefix = hit.and_then(|hit| hit.apply(&mut request.path_parts));
+                (request, body_stream, alias_prefix)
+            } else {
+                let (request, body_stream) = Request::from_hyper_parts(req);
+                (request, body_stream, None)
+            };
 
             // 3. CORS preflight: synthesize the 204 ourselves before any
             //    application-layer work. Preflights are HTTP-protocol
@@ -877,7 +897,7 @@ impl Server {
 
             // 7. Body parse (JSON / form / opaque, per Content-Type).
             //    Malformed body → 400 through the after-chain.
-            let params = match request.to_params() {
+            let mut params = match request.to_params() {
                 Ok(p) => p,
                 Err(e) => {
                     return Ok(self
@@ -890,6 +910,11 @@ impl Server {
                         .await);
                 }
             };
+            // The router's answer to "did an alias route this?", for the
+            // handler — so it never has to match `Host` a second time.
+            if let Some(prefix) = alias_prefix {
+                params.set_alias_prefix(prefix);
+            }
 
             // 8. Dispatch via the matched controller. 405 (verb mismatch
             //    inside the controller) and handler-returned errors both
