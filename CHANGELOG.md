@@ -10,6 +10,13 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Documentation
+
+- README § "Parameter extraction": to carry a request's query onto a redirect,
+  rebuild it from `params.query()` — a form-style query's names and values
+  all survive, each name's values in request order — and sort by name when
+  re-encoding, since the map's iteration order varies between requests.
+
 ## [1.7.0]
 
 ### Added

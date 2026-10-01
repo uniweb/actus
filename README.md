@@ -271,6 +271,8 @@ A path `{id}` and a query `?id=…` can't both bind to a handler (one Rust param
 
 For *open-ended* query parameters — a search endpoint with arbitrary filters, a request proxy — declare `params: &Params`, mark the controller `#[controller(lax)]`, and read `params.query()` (the whole `HashMap<String, Vec<String>>`). Handlers that know their parameter names up front should declare them as typed args (raw-identifier-named if need be); this is the escape hatch, not the default.
 
+To carry a request's query onto a redirect, rebuild it from `params.query()` rather than looking for the raw string. For a form-style query, every name and value survives, and each name's values keep their request order; only the order across names and the spelling of percent-escapes can differ, and neither changes what the query means. Sort by name when you re-encode: the map's iteration order varies from request to request, and a `Location` should not.
+
 When declaring a parameter whose name is a Rust keyword, you must uses a **raw identifier** only in the code. For example, `r#type: Vec<String>` binds the `type` query key, `r#move: String` the `move` key, etc. The `r#` is just how you write a keyword as an identifier; it isn't part of the wire name. So a `?type=` filter doesn't need any special treatment in its declaration.
 
 ## Authentication and authorization
