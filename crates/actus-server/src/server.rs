@@ -23,7 +23,10 @@ use hyper::service::service_fn;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -84,6 +87,9 @@ pub struct Server {
     /// before dropping the connection. Catches slowloris and clients that
     /// TCP-connect-and-send-nothing. `None` leaves hyper's default (none).
     header_read_timeout: Option<Duration>,
+    /// `Some(counter)`: every response's body bytes are added to `counter` as they are written,
+    /// after compression ([`Server::with_sent_bytes`]). `None` counts nothing (the default).
+    sent_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl Server {
@@ -104,6 +110,7 @@ impl Server {
             max_connections: None,
             max_inflight_body_bytes: None,
             header_read_timeout: None,
+            sent_bytes: None,
         }
     }
 
@@ -157,6 +164,23 @@ impl Server {
     #[cfg(feature = "compression")]
     pub fn with_compression(mut self, layer: CompressionLayer) -> Self {
         self.compression = Some(Arc::new(layer));
+        self
+    }
+
+    /// Counts the body bytes of every response into `counter`, as they are handed to the
+    /// connection — **after compression**, so the count is what actually left, not what the
+    /// handler built.
+    ///
+    /// Every reply is counted: handler successes, middleware short-circuits, errors, and the
+    /// `504` of a timed-out request. A streamed body counts as it streams, so a client that
+    /// disconnects mid-body leaves only what was written. Headers are not counted, nor are the
+    /// bytes of a connection after a protocol upgrade (WebSocket) — they are no longer HTTP
+    /// responses.
+    ///
+    /// The counter is the caller's: read it, or swap it to zero, from anywhere. Typical use is
+    /// metering what a deployment sends, which compression changes several-fold for text.
+    pub fn with_sent_bytes(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.sent_bytes = Some(counter);
         self
     }
 
@@ -714,7 +738,7 @@ impl Server {
         let timeout = self.request_timeout;
         let app = self.clone();
         let inner = app.handle_request_inner(req);
-        match timeout {
+        let response = match timeout {
             None => inner.await,
             Some(d) => match tokio::time::timeout(d, inner).await {
                 Ok(r) => r,
@@ -723,7 +747,17 @@ impl Server {
                     Ok(self.finalizer.build_error(WebError::Timeout).await)
                 }
             },
-        }
+        };
+        // Counted here, outermost, so nothing written after it — compression included — escapes.
+        response.map(|response| match &self.sent_bytes {
+            Some(counter) => response.map(|body| {
+                BoxBody::new(CountingBody {
+                    inner: body,
+                    counter: counter.clone(),
+                })
+            }),
+            None => response,
+        })
     }
 
     /// The actual request pipeline. Split from
@@ -967,5 +1001,39 @@ async fn default_shutdown_signal() {
             .await
             .expect("install Ctrl-C handler");
         info!("Received Ctrl-C");
+    }
+}
+
+/// A response body that adds the length of each data frame to a counter as the frame is handed
+/// to the connection ([`Server::with_sent_bytes`]).
+struct CountingBody {
+    inner: ResponseBody,
+    counter: Arc<AtomicU64>,
+}
+
+impl hyper::body::Body for CountingBody {
+    type Data = Bytes;
+    type Error = WebError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, WebError>>> {
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(frame))) = &polled
+            && let Some(data) = frame.data_ref()
+        {
+            this.counter.fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
     }
 }

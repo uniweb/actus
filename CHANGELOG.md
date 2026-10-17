@@ -10,6 +10,15 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **`Server::with_sent_bytes(counter)`** counts the body bytes of every response into an
+  `Arc<AtomicU64>` the caller owns, as each frame is handed to the connection. It counts
+  **after compression**, so the figure is what actually left rather than what the handler
+  built, and it counts every reply: handler successes, middleware short-circuits, errors,
+  and a timed-out request's `504`. A streamed body counts as it streams. Headers, and a
+  connection's bytes after a protocol upgrade, are not counted.
+
 ### Documentation
 
 - README § "Parameter extraction": to carry a request's query onto a redirect,
