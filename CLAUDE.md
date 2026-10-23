@@ -23,14 +23,14 @@ Five crates plus two examples:
 - `crates/actus-controller/macros/` — `#[controller]`, `routes!`, `app_routes!` proc-macros.
 - `crates/actus-server/` — hyper-based `Server` (with `router()`), longest-prefix `Router` (`mounts()` — the per-mount inventory, absences included — and `RateLimitClass`), host aliases (`RouterBuilder::host_alias`, the `host` module; applied to `Request::path_parts` before routing), `Request`, `Middleware`, `CorsLayer`; `CompressionLayer` (behind `compression`); `websocket::{upgrade, WebSocket, Message}` (behind `websocket`); `openapi::{generate, Options}` (behind `openapi`).
 - `crates/actus/` — facade crate; re-exports the prelude for end users.
-- `examples/basic/` — wires services + `app_routes!` + JSON body + header auth + verb restrictions + `{...path}` rest param + CORS + compression + WebSocket echo + SSE + OpenAPI + a maintenance-mode middleware, all served over real HTTP. Always keep this compiling.
+- `examples/basic/` — wires services + `app_routes!` + JSON body + header auth + verb restrictions + `{...path}` rest param + CORS + compression + gzip request bodies + WebSocket echo + SSE + OpenAPI + a maintenance-mode middleware, all served over real HTTP. Always keep this compiling.
 - `examples/advanced/` — the application-side patterns in working code: a domain-error → `WebError` mapping, `ProblemDetails` with `field`/`rule`, a class-based rate-limit `Middleware` with a startup coverage check (`--check`), per-controller `max_body_bytes`, **route families** (`#[controller(expects = …)]` floors, the `families { … }` block on `app_routes!`, `family_coverage` at boot, a declaration-keyed `FloorGate` middleware via `server.router()`), and the daemon-guard integration tests (`tests/integration.rs`). Also keep compiling.
 
 ## Feature flags
 
 Default-off; opt in on the `actus` facade crate, which forwards to `actus-server`:
 
-- `compression` — pulls in `flate2` + `brotli`; enables `Server::with_compression(CompressionLayer::…)`.
+- `compression` — pulls in `flate2` + `brotli`; enables `Server::with_compression(CompressionLayer::…)` and `Server::with_gzip_request_bodies()`.
 - `websocket` — pulls in `tokio-tungstenite`; enables `actus::ws::upgrade(...)`, `WebSocket`, `Message`, and the `with_upgrades()` branch in the accept loop.
 - `openapi` — enables `actus::openapi::{generate, Options}` (OpenAPI 3.x doc generation). Pulls in no extra crates — it just compiles the module against the already-present `serde_json`.
 

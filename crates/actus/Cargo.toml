@@ -33,8 +33,9 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-# Response compression (gzip / brotli) — off by default. With it enabled,
-# `Server::with_compression` and `CompressionLayer` become available.
+# Response compression (gzip / brotli) and gzip request-body decoding — off by
+# default. With it enabled, `Server::with_compression`, `CompressionLayer` and
+# `Server::with_gzip_request_bodies` become available.
 compression = ["actus-server/compression"]
 # WebSocket support — off by default. With it enabled, `actus::ws` (and the
 # `Message` / `WebSocket` prelude items) become available.

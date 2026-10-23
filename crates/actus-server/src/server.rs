@@ -7,7 +7,7 @@ use crate::compression::CompressionLayer;
 use crate::cors::CorsLayer;
 use crate::error::ServerError;
 use crate::middleware::{Middleware, MiddlewareChain, Outcome};
-use crate::request::{Request, has_content_coding, has_undecoded_transfer_coding};
+use crate::request::{ContentCoding, Request, content_coding, has_undecoded_transfer_coding};
 use crate::router::Router;
 #[cfg(feature = "websocket")]
 use crate::websocket;
@@ -92,6 +92,10 @@ pub struct Server {
     /// `counter` ([`Server::with_sent_bytes`]). `None` counts nothing (the
     /// default).
     sent_bytes: Option<Arc<AtomicU64>>,
+    /// `true`: a `gzip`-coded request body is decoded rather than refused
+    /// ([`Server::with_gzip_request_bodies`]). `false` by default.
+    #[cfg(feature = "compression")]
+    gzip_request_bodies: bool,
 }
 
 impl Server {
@@ -113,6 +117,8 @@ impl Server {
             max_inflight_body_bytes: None,
             header_read_timeout: None,
             sent_bytes: None,
+            #[cfg(feature = "compression")]
+            gzip_request_bodies: false,
         }
     }
 
@@ -166,6 +172,30 @@ impl Server {
     #[cfg(feature = "compression")]
     pub fn with_compression(mut self, layer: CompressionLayer) -> Self {
         self.compression = Some(Arc::new(layer));
+        self
+    }
+
+    /// Decodes `gzip` request bodies: a request sent with
+    /// `Content-Encoding: gzip` reaches middleware and the handler as the
+    /// content it encodes, with `Content-Encoding` and `Content-Length`
+    /// removed. Without this, such a request is refused with `415`.
+    ///
+    /// **The body cap applies to the decoded size** — the controller's
+    /// `max_body_bytes`, else [`Server::with_max_body_bytes`] — as well as to
+    /// the coded bytes read, so a few KB of gzip that would decode to
+    /// gigabytes is a `413` as soon as its output passes the cap. Decoding is
+    /// streamed: memory stays at the cap, as for an unencoded body. A corrupt
+    /// or truncated stream is a `400`.
+    ///
+    /// Only a single `gzip` is decoded (`x-gzip` is its alias). Any other
+    /// coding, or codings stacked, is still a `415`, whose
+    /// `Accept-Encoding: gzip, identity` names what would have been
+    /// accepted. Middleware sees the decoded body, so a check over the bytes
+    /// as sent — a webhook signature — needs a sender that does not compress.
+    /// *(Requires the `compression` feature.)*
+    #[cfg(feature = "compression")]
+    pub fn with_gzip_request_bodies(mut self) -> Self {
+        self.gzip_request_bodies = true;
         self
     }
 
@@ -619,36 +649,57 @@ impl Server {
         .await
     }
 
-    /// The reply refusing a request whose body would reach the handler still
-    /// encoded, or `None`. Actus decodes no request coding, and a handler must
-    /// never receive encoded bytes as though they were the content: a JSON
-    /// route would fail to parse them, and a route storing bytes would store
-    /// the encoding.
+    /// How to buffer a request's body, decided from its codings before it is
+    /// read — or the reply refusing it. A handler must never receive encoded
+    /// bytes as though they were the content: a JSON route would fail to
+    /// parse them, and a route storing bytes would store the encoding.
     ///
     /// - A transfer coding besides a lone `chunked` is one the server does not
     ///   understand: `501 Not Implemented` (RFC 9112 §6.1).
-    /// - A content coding other than `identity`: `415 Unsupported Media Type`,
-    ///   with an `Accept-Encoding` naming what would have been accepted (RFC
-    ///   9110 §12.5.3). A request with no body is not refused over the
-    ///   header alone.
-    fn coding_refusal(&self, headers: &HeaderMap, body: &Incoming) -> Option<ReplyData> {
+    /// - A `gzip` content coding is decoded, when
+    ///   `Server::with_gzip_request_bodies` turned that on.
+    /// - Any other content coding but `identity`: `415 Unsupported Media
+    ///   Type`, with an `Accept-Encoding` naming what would have been accepted
+    ///   (RFC 9110 §12.5.3).
+    ///
+    /// A request with no body is taken as sent: there is nothing to decode,
+    /// and it is not refused over the header alone.
+    fn body_coding(&self, headers: &HeaderMap, body: &Incoming) -> Result<BodyCoding, ReplyData> {
         if has_undecoded_transfer_coding(headers) {
-            return Some(
-                self.finalizer.error_to_reply(WebError::Problem(
-                    ProblemDetails::new(StatusCode::NOT_IMPLEMENTED, "Not Implemented")
-                        .detail("send the request body with no transfer coding but chunked"),
-                )),
-            );
+            return Err(self.finalizer.error_to_reply(WebError::Problem(
+                ProblemDetails::new(StatusCode::NOT_IMPLEMENTED, "Not Implemented")
+                    .detail("send the request body with no transfer coding but chunked"),
+            )));
         }
-        if !body.is_end_stream() && has_content_coding(headers) {
-            let mut data = self.finalizer.error_to_reply(WebError::Problem(
-                ProblemDetails::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Unsupported Media Type")
-                    .detail("send the request body without a Content-Encoding"),
-            ));
-            data.add_header("Accept-Encoding", "identity");
-            return Some(data);
+        if body.is_end_stream() {
+            return Ok(BodyCoding::AsSent);
         }
-        None
+        match content_coding(headers) {
+            ContentCoding::Identity => Ok(BodyCoding::AsSent),
+            #[cfg(feature = "compression")]
+            ContentCoding::Gzip if self.gzip_request_bodies => Ok(BodyCoding::Gzip),
+            _ => {
+                let mut data = self.finalizer.error_to_reply(WebError::Problem(
+                    ProblemDetails::new(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "Unsupported Media Type",
+                    )
+                    .detail("Content-Encoding not accepted; Accept-Encoding lists what is"),
+                ));
+                data.add_header("Accept-Encoding", self.accepted_request_codings());
+                Err(data)
+            }
+        }
+    }
+
+    /// The request content codings this server takes, as the `Accept-Encoding`
+    /// of a content-coding `415` lists them.
+    fn accepted_request_codings(&self) -> &'static str {
+        #[cfg(feature = "compression")]
+        if self.gzip_request_bodies {
+            return "gzip, identity";
+        }
+        "identity"
     }
 
     /// Run the after-middleware chain, then turn the reply into a `Response`
@@ -807,8 +858,8 @@ impl Server {
     ///    body (efficiency win on adversarial bad-path requests); then stamp
     ///    the matched controller's rate-limit class onto the request, so a
     ///    `before` middleware (which only gets `&Request`) can read it; then
-    ///    refuse a body that would arrive still encoded (`415` / `501`),
-    ///    also without reading it
+    ///    decide from its codings how to buffer the body — as sent, decoded
+    ///    from gzip, or refused (`415` / `501`) — also without reading it
     /// 5. buffer the body, capped per the resolved policy (today: server-
     ///    wide; soon, per-controller / per-route)
     /// 6. middleware `before`
@@ -900,19 +951,23 @@ impl Server {
             //     whole pipeline, including the after-chain on error replies.)
             request.rate_limit_class = route_match.controller.actus_rate_limit();
 
-            // 4c. Refuse a body that would reach the handler still encoded
-            //     (`415` / `501`, see `coding_refusal`) — before reading it,
-            //     so the body cap and the inflight budget are never touched.
-            if let Some(data) = self.coding_refusal(&request.headers, &body_stream) {
-                return Ok(self
-                    .finalize_reply(
-                        data,
-                        &request,
-                        #[cfg(feature = "websocket")]
-                        ws_upgrade,
-                    )
-                    .await);
-            }
+            // 4c. Decide from the body's codings how to buffer it — as sent,
+            //     decoded from gzip, or not at all (`415` / `501`, see
+            //     `body_coding`) — before reading it, so a refused body never
+            //     touches the body cap or the inflight budget.
+            let coding = match self.body_coding(&request.headers, &body_stream) {
+                Ok(coding) => coding,
+                Err(refusal) => {
+                    return Ok(self
+                        .finalize_reply(
+                            refusal,
+                            &request,
+                            #[cfg(feature = "websocket")]
+                            ws_upgrade,
+                        )
+                        .await);
+                }
+            };
 
             // 5. Resolve the effective body cap: the matched controller's
             //    `#[controller(max_body_bytes = …)]` if it set one, otherwise
@@ -922,18 +977,28 @@ impl Server {
             //
             //    The error path returns the same skeleton so the after-chain
             //    still has a `Request`.
+            //
+            //    A gzip body is decoded as it is buffered, the cap holding its
+            //    decoded size as well as its coded one.
             let effective_cap = route_match
                 .controller
                 .actus_max_body_bytes()
                 .unwrap_or(self.max_body_bytes);
-            request = match request
-                .collect_body(
-                    body_stream,
-                    effective_cap,
-                    self.max_inflight_body_bytes.as_ref(),
-                )
-                .await
-            {
+            let budget = self.max_inflight_body_bytes.as_ref();
+            let collected = match coding {
+                BodyCoding::AsSent => {
+                    request
+                        .collect_body(body_stream, effective_cap, budget)
+                        .await
+                }
+                #[cfg(feature = "compression")]
+                BodyCoding::Gzip => {
+                    request
+                        .collect_gzip_body(body_stream, effective_cap, budget)
+                        .await
+                }
+            };
+            request = match collected {
                 Ok(r) => r,
                 Err((request, e)) => {
                     warn!("rejecting request before parse: {}", e);
@@ -1051,6 +1116,16 @@ async fn default_shutdown_signal() {
             .expect("install Ctrl-C handler");
         info!("Received Ctrl-C");
     }
+}
+
+/// How a request body is buffered, as [`Server::body_coding`] decided from its
+/// codings.
+enum BodyCoding {
+    /// As sent: there is no coding to undo.
+    AsSent,
+    /// Decoded from `gzip` ([`Server::with_gzip_request_bodies`]).
+    #[cfg(feature = "compression")]
+    Gzip,
 }
 
 /// An accepted connection that adds every byte written to it to the

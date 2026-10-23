@@ -10,6 +10,21 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **`Server::with_gzip_request_bodies()`** decodes gzip request bodies
+  instead of refusing them with `415`: a request sent with
+  `Content-Encoding: gzip` (or `x-gzip`, its alias) reaches middleware and
+  the handler as the content it encodes, with `Content-Encoding` and
+  `Content-Length` removed. **The body cap applies to the decoded size**, as
+  well as to the coded bytes read, so a few KB of gzip that would decode to
+  gigabytes is a `413` as soon as its output passes the cap; decoding is
+  streamed, so memory stays at the cap; a corrupt or truncated stream is a
+  `400`. Only a single gzip is decoded: any other coding, or codings stacked,
+  is still a `415`, whose `Accept-Encoding` now reads `gzip, identity`.
+  Requires the `compression` feature, whose `flate2` already carries the
+  decoder.
+
 ## [1.8.0]
 
 ### Changed

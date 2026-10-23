@@ -59,8 +59,9 @@
 //! serde_json = "1"
 //! ```
 //!
-//! Optional features: `compression` (gzip/brotli responses), `websocket`
-//! ([`ws::upgrade`]), and `openapi` (OpenAPI 3.x generation).
+//! Optional features: `compression` (gzip/brotli responses, gzip request
+//! bodies), `websocket` ([`ws::upgrade`]), and `openapi` (OpenAPI 3.x
+//! generation).
 //!
 //! # Quick start
 //!
@@ -125,8 +126,9 @@
 //! - **Replies** — `reply!` for JSON, chunked streams, and Server-Sent
 //!   Events; `WebError` for structured RFC 7807 `application/problem+json`.
 //! - **HTTP-protocol features** — `Server::with_cors`, `with_compression`
-//!   (gzip/brotli, `compression` feature), a per-request timeout, and three
-//!   DoS guards (max connections, in-flight body budget, header-read timeout).
+//!   (gzip/brotli) and `with_gzip_request_bodies` (both behind the
+//!   `compression` feature), a per-request timeout, and three DoS guards (max
+//!   connections, in-flight body budget, header-read timeout).
 //! - **WebSocket** (`websocket` feature) — `ws::upgrade(...)` from a handler.
 //! - **OpenAPI 3.x** (`openapi` feature) — `openapi::generate(...)` walks the
 //!   route tree and emits a spec.

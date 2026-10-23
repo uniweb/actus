@@ -10,9 +10,12 @@
 //! * Routing still comes first (an unknown path is a `404`), and the refusal
 //!   precedes the body cap: an encoded body over it is never read.
 //! * A transfer coding besides a lone `chunked` is a `501` (RFC 9112 §6.1).
+//! * With `Server::with_gzip_request_bodies`, a gzip body is decoded instead,
+//!   the body cap holding its decoded size, and every other coding is still a
+//!   `415` — now naming `gzip` as accepted.
 
 use actus::prelude::*;
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,6 +33,8 @@ impl Store {
     routes! {
         PUT "" => put(params: &Params),
         GET "" => get(),
+        POST "echo" => echo(params: &Params),
+        POST "json" => json_echo(data: JsonValue),
     }
 
     pub async fn put(&self, params: &Params) -> Reply {
@@ -40,6 +45,19 @@ impl Store {
     pub async fn get(&self) -> Reply {
         self.hits.fetch_add(1, Ordering::Relaxed);
         reply!(json!({ "ok": true }))
+    }
+
+    /// The body and the coding headers as the handler sees them.
+    pub async fn echo(&self, params: &Params) -> Reply {
+        reply!(json!({
+            "body": String::from_utf8_lossy(params.body_bytes()),
+            "content_encoding": params.header("content-encoding"),
+            "content_length": params.header("content-length"),
+        }))
+    }
+
+    pub async fn json_echo(&self, data: JsonValue) -> Reply {
+        reply!(data)
     }
 }
 
@@ -64,14 +82,21 @@ impl Middleware for StampAfter {
 /// Start a server on an ephemeral port it keeps (never bind, drop and re-bind
 /// — see `tests/middleware.rs`); return `(addr, hits, shutdown_tx)`.
 async fn spawn() -> (SocketAddr, Arc<AtomicUsize>, oneshot::Sender<()>) {
+    spawn_with(|server| server).await
+}
+
+/// [`spawn`], with `configure` applied to the server.
+async fn spawn_with(
+    configure: impl FnOnce(Server) -> Server,
+) -> (SocketAddr, Arc<AtomicUsize>, oneshot::Sender<()>) {
     let hits = Arc::new(AtomicUsize::new(0));
-    let router = init(hits.clone()).await.unwrap();
+    let server =
+        configure(Server::new(init(hits.clone()).await.unwrap()).with_middleware(StampAfter));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        Server::new(router)
-            .with_middleware(StampAfter)
+        server
             .run_with_shutdown_listener(listener, async move {
                 let _ = rx.await;
             })
@@ -222,4 +247,93 @@ async fn a_transfer_coding_besides_chunked_is_not_implemented() {
     assert_eq!(status, 200, "{response}");
     assert!(response.contains(r#""stored":3"#), "{response}");
     assert_eq!(hits.load(Ordering::Relaxed), 1);
+}
+
+/// `Server::with_gzip_request_bodies`: a gzip body is decoded, not refused.
+#[cfg(feature = "compression")]
+mod gzip_bodies {
+    use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn spawn() -> (SocketAddr, Arc<AtomicUsize>, oneshot::Sender<()>) {
+        spawn_with(Server::with_gzip_request_bodies).await
+    }
+
+    #[tokio::test]
+    async fn a_gzip_body_reaches_the_handler_decoded() {
+        let (addr, _hits, _stop) = spawn().await;
+
+        // A JSON route parses the decoded body.
+        let head = "POST /store/json HTTP/1.1\r\nContent-Type: application/json\r\n\
+                    Content-Encoding: gzip\r\n";
+        let (status, response) = send(addr, &request(head, &gzip(br#"{"name":"site"}"#))).await;
+        assert_eq!(status, 200, "{response}");
+        assert!(response.contains(r#"{"name":"site"}"#), "{response}");
+
+        // A route reading bytes gets the content, and neither header that
+        // described the coded bytes. `x-gzip` is gzip's alias.
+        for coding in ["gzip", "x-gzip"] {
+            let head = format!(
+                "POST /store/echo HTTP/1.1\r\nContent-Type: application/octet-stream\r\n\
+                 Content-Encoding: {coding}\r\n"
+            );
+            let (status, response) = send(addr, &request(&head, &gzip(b"hello, world"))).await;
+            assert_eq!(status, 200, "{coding}: {response}");
+            assert!(response.contains(r#""body":"hello, world""#), "{response}");
+            assert!(
+                response.contains(r#""content_encoding":null"#),
+                "{response}"
+            );
+            assert!(response.contains(r#""content_length":null"#), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_body_cap_holds_the_decoded_size() {
+        let (addr, hits, _stop) = spawn().await;
+
+        // 1 KiB of zeros codes to a few dozen bytes: under `Store`'s 64-byte
+        // cap as sent, sixteen times over it decoded.
+        let coded = gzip(&[0u8; 1024]);
+        assert!(coded.len() < 64, "coded to {} bytes", coded.len());
+        let head = format!("{PUT_BYTES}Content-Encoding: gzip\r\n");
+        let (status, response) = send(addr, &request(&head, &coded)).await;
+        assert_eq!(status, 413, "{response}");
+        assert_eq!(hits.load(Ordering::Relaxed), 0, "the handler never ran");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_valid_gzip_is_400() {
+        let (addr, hits, _stop) = spawn().await;
+
+        let head = format!("{PUT_BYTES}Content-Encoding: gzip\r\n");
+        let (status, response) = send(addr, &request(&head, b"plainly not gzip")).await;
+        assert_eq!(status, 400, "{response}");
+        assert!(response.contains("not valid gzip"), "{response}");
+        assert_eq!(hits.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn other_codings_are_still_refused_now_naming_gzip() {
+        let (addr, hits, _stop) = spawn().await;
+
+        for coding in ["br", "gzip, gzip"] {
+            let head = format!("{PUT_BYTES}Content-Encoding: {coding}\r\n");
+            let (status, response) = send(addr, &request(&head, b"abc")).await;
+            assert_eq!(status, 415, "Content-Encoding: {coding}");
+            assert!(
+                response.contains("accept-encoding: gzip, identity"),
+                "{response}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::Relaxed), 0);
+    }
 }

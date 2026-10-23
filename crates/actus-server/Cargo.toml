@@ -46,7 +46,8 @@ brotli = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 
 [features]
-# Response compression (gzip / brotli) via `Server::with_compression`.
+# Response compression (gzip / brotli) via `Server::with_compression`, and
+# gzip request-body decoding via `Server::with_gzip_request_bodies`.
 compression = ["dep:flate2", "dep:brotli"]
 # WebSocket support via `actus_server::websocket` (`ws::upgrade`).
 websocket = ["dep:tokio-tungstenite"]

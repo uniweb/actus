@@ -10,7 +10,7 @@ use http_body_util::{BodyExt, LengthLimitError, Limited};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// An incoming HTTP request, as seen by middleware and used to build the
 /// typed [`Params`] handed to a handler.
@@ -33,7 +33,10 @@ pub struct Request {
     /// `application/x-www-form-urlencoded` body fields are appended into the
     /// same map by [`Request::to_params`].
     pub query_params: HashMap<String, Vec<String>>,
-    /// The raw request body. Empty for bodyless requests.
+    /// The request body: as sent, or — when `Server::with_gzip_request_bodies`
+    /// is on and it arrived gzip-coded — the content it encodes, with
+    /// `Content-Encoding` and `Content-Length` gone from [`Request::headers`].
+    /// Empty for bodyless requests.
     pub body: Bytes,
     /// The request headers.
     pub headers: HeaderMap,
@@ -68,11 +71,7 @@ fn collect_pairs(pairs: Vec<(String, String)>) -> HashMap<String, Vec<String>> {
 /// `400`.
 ///
 /// If `budget` is `Some`, the per-request cap is *also* reserved from a
-/// shared semaphore — when the server-wide budget is exhausted, the request
-/// is refused with `WebError::Busy` (→ 503) and a short `Retry-After`. The
-/// reservation is conservative (pre-reserves `max_bytes` even for requests
-/// whose body turns out to be smaller); the alternative — per-chunk byte
-/// accounting — is more code for the same effective ceiling.
+/// shared semaphore (see `reserve`).
 async fn collect_body_capped<B>(
     body: B,
     max_bytes: usize,
@@ -82,27 +81,224 @@ where
     B: hyper::body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    // Reserve from the global byte budget before touching the body. Tokio
-    // `Semaphore::acquire_many` takes a `u32`; we cap accordingly. The
-    // permit stays alive for the duration of this function — when we
+    // The permit stays alive for the duration of this function — when we
     // return (Ok or Err) it's released.
-    let _permit = match budget {
-        Some(s) => {
-            let n = u32::try_from(max_bytes).unwrap_or(u32::MAX);
-            match s.clone().try_acquire_many_owned(n) {
-                Ok(p) => Some(p),
-                Err(_) => return Err(WebError::Busy(Some(Duration::from_secs(1)))),
-            }
-        }
-        None => None,
-    };
-
+    let _permit = reserve(budget, max_bytes)?;
     match Limited::new(body, max_bytes).collect().await {
         Ok(collected) => Ok(collected.to_bytes()),
-        Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => Err(WebError::PayloadTooLarge),
-        Err(e) => Err(WebError::BadRequest(format!(
-            "could not read request body: {e}"
-        ))),
+        Err(e) => Err(read_error(e)),
+    }
+}
+
+/// Reserve a body's cap from the server-wide inflight budget, before touching
+/// the body — when the budget is exhausted, the request is refused with
+/// `WebError::Busy` (→ 503) and a short `Retry-After`. The reservation is
+/// conservative (pre-reserves `max_bytes` even for requests whose body turns
+/// out to be smaller); the alternative — per-chunk byte accounting — is more
+/// code for the same effective ceiling. `None` budget, `None` permit.
+fn reserve(
+    budget: Option<&Arc<Semaphore>>,
+    max_bytes: usize,
+) -> Result<Option<OwnedSemaphorePermit>, WebError> {
+    let Some(s) = budget else {
+        return Ok(None);
+    };
+    // Tokio `Semaphore::acquire_many` takes a `u32`; we cap accordingly.
+    let n = u32::try_from(max_bytes).unwrap_or(u32::MAX);
+    match s.clone().try_acquire_many_owned(n) {
+        Ok(p) => Ok(Some(p)),
+        Err(_) => Err(WebError::Busy(Some(Duration::from_secs(1)))),
+    }
+}
+
+/// A failure reading the body itself: past the cap is `413`, anything else (a
+/// truncated or aborted body) a `400`.
+fn read_error(e: Box<dyn std::error::Error + Send + Sync>) -> WebError {
+    if e.downcast_ref::<LengthLimitError>().is_some() {
+        WebError::PayloadTooLarge
+    } else {
+        WebError::BadRequest(format!("could not read request body: {e}"))
+    }
+}
+
+/// Decoding a `gzip`-coded request body (`Server::with_gzip_request_bodies`).
+#[cfg(feature = "compression")]
+mod gzip {
+    use super::*;
+    use std::io::{self, Write};
+
+    /// Buffer a `gzip`-coded body as the content it encodes, holding both
+    /// sides to `max_bytes`: the coded bytes read, and the decoded bytes kept
+    /// — a few KB of gzip can decode to gigabytes. Past either limit the body
+    /// is a `413`; a corrupt or truncated stream is a `400`. Each frame is
+    /// decoded as it arrives (flate2 hands on its output 32 KiB at a time), so
+    /// memory stays at the cap, as for an unencoded body, and the inflight
+    /// budget is reserved the same way.
+    pub(super) async fn collect_capped<B>(
+        body: B,
+        max_bytes: usize,
+        budget: Option<&Arc<Semaphore>>,
+    ) -> Result<Bytes, WebError>
+    where
+        B: hyper::body::Body<Data = Bytes>,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let _permit = reserve(budget, max_bytes)?;
+        let mut body = std::pin::pin!(Limited::new(body, max_bytes));
+        // `MultiGzDecoder`: a gzip stream may be several members back to back.
+        let mut decoder = flate2::write::MultiGzDecoder::new(CappedBuf {
+            bytes: Vec::new(),
+            cap: max_bytes,
+        });
+        while let Some(frame) = body.frame().await {
+            if let Some(data) = frame.map_err(read_error)?.data_ref() {
+                decoder.write_all(data).map_err(error)?;
+            }
+        }
+        // Finishing checks the gzip trailer (CRC and length), so a stream cut
+        // short fails here rather than passing as a shorter body.
+        let decoded = decoder.finish().map_err(error)?;
+        Ok(Bytes::from(decoded.bytes))
+    }
+
+    /// The decoded body, refusing to grow past the body cap: the write that
+    /// would cross it fails with [`DecodedTooLarge`].
+    struct CappedBuf {
+        bytes: Vec<u8>,
+        cap: usize,
+    }
+
+    impl Write for CappedBuf {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if self.bytes.len() + data.len() > self.cap {
+                return Err(io::Error::other(DecodedTooLarge));
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A body decoded past the cap — told apart from a corrupt stream.
+    #[derive(Debug)]
+    struct DecodedTooLarge;
+
+    impl std::fmt::Display for DecodedTooLarge {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the decoded request body exceeds the body cap")
+        }
+    }
+
+    impl std::error::Error for DecodedTooLarge {}
+
+    /// A decoding failure: past the cap is a `413`; anything else — not gzip,
+    /// corrupt, or cut short — a `400`.
+    fn error(e: io::Error) -> WebError {
+        if e.get_ref()
+            .is_some_and(|inner| inner.is::<DecodedTooLarge>())
+        {
+            WebError::PayloadTooLarge
+        } else {
+            WebError::BadRequest(format!("request body is not valid gzip: {e}"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        fn gzip(data: &[u8]) -> Vec<u8> {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        async fn decode(coded: Vec<u8>, max_bytes: usize) -> Result<Bytes, WebError> {
+            collect_capped(
+                http_body_util::Full::new(Bytes::from(coded)),
+                max_bytes,
+                None,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn a_gzip_body_decodes_to_its_content() {
+            let decoded = decode(gzip(b"hello, world"), 1024).await.unwrap();
+            assert_eq!(decoded, Bytes::from_static(b"hello, world"));
+        }
+
+        #[tokio::test]
+        async fn members_back_to_back_decode_in_order() {
+            let mut coded = gzip(b"hello, ");
+            coded.extend(gzip(b"world"));
+            let decoded = decode(coded, 1024).await.unwrap();
+            assert_eq!(decoded, Bytes::from_static(b"hello, world"));
+        }
+
+        #[tokio::test]
+        async fn decoding_past_the_cap_is_413() {
+            // 1 MiB of zeros codes to about 1 KiB: well under the cap coded,
+            // a thousand times over it decoded.
+            let coded = gzip(&vec![0u8; 1 << 20]);
+            assert!(coded.len() < 2048, "coded to {} bytes", coded.len());
+            match decode(coded, 2048).await {
+                Err(WebError::PayloadTooLarge) => {}
+                other => panic!("expected PayloadTooLarge, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn coded_bytes_past_the_cap_are_413() {
+            // Incompressible bytes (xorshift) code to more than they decode
+            // to, so the content fits the cap and only its coding is over.
+            let mut x: u32 = 0x9e37_79b9;
+            let noise: Vec<u8> = (0..1000)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    (x >> 24) as u8
+                })
+                .collect();
+            let coded = gzip(&noise);
+            let cap = 1010;
+            assert!(
+                noise.len() <= cap && coded.len() > cap,
+                "coded to {}",
+                coded.len()
+            );
+            match decode(coded, cap).await {
+                Err(WebError::PayloadTooLarge) => {}
+                other => panic!("expected PayloadTooLarge, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn not_gzip_corrupt_or_cut_short_is_400() {
+            let coded = gzip(b"hello, world");
+            let mut corrupt = coded.clone();
+            let middle = corrupt.len() / 2;
+            corrupt[middle] ^= 0xff;
+            let cut_short = coded[..coded.len() - 4].to_vec();
+            for (what, body) in [
+                ("not gzip", b"hello, world".to_vec()),
+                ("corrupt", corrupt),
+                ("cut short", cut_short),
+            ] {
+                match decode(body, 1024).await {
+                    Err(WebError::BadRequest(msg)) => {
+                        assert!(msg.contains("gzip"), "{what}: {msg}")
+                    }
+                    other => panic!("{what}: expected BadRequest, got {other:?}"),
+                }
+            }
+        }
     }
 }
 
@@ -181,6 +377,32 @@ impl Request {
         match collect_body_capped(body, max_body_bytes, inflight_budget).await {
             Ok(body_bytes) => {
                 self.body = body_bytes;
+                Ok(self)
+            }
+            Err(e) => Err((self, e)),
+        }
+    }
+
+    /// [`Request::collect_body`] for a `gzip`-coded body: buffers the content
+    /// it encodes, with `max_body_bytes` capping the decoded size as well as
+    /// the coded bytes read, then drops `Content-Encoding` and
+    /// `Content-Length` — they described the coded bytes — so middleware and
+    /// the handler see an ordinary body.
+    //
+    // Same deliberate large `Err` as `collect_body`.
+    #[cfg(feature = "compression")]
+    #[allow(clippy::result_large_err)]
+    pub(crate) async fn collect_gzip_body(
+        mut self,
+        body: hyper::body::Incoming,
+        max_body_bytes: usize,
+        inflight_budget: Option<&Arc<Semaphore>>,
+    ) -> Result<Self, (Self, WebError)> {
+        match gzip::collect_capped(body, max_body_bytes, inflight_budget).await {
+            Ok(decoded) => {
+                self.body = decoded;
+                self.headers.remove(http::header::CONTENT_ENCODING);
+                self.headers.remove(http::header::CONTENT_LENGTH);
                 Ok(self)
             }
             Err(e) => Err((self, e)),
@@ -318,22 +540,42 @@ fn is_json_content_type(ct: &str) -> bool {
     ct == "application/json" || ct.ends_with("+json")
 }
 
-/// Whether the request's `Content-Encoding` names a content coding: anything
-/// but `identity`, which RFC 9110 §12.5.3 makes a synonym for "no encoding".
-/// Codings are case-insensitive (§8.4.1), the field is a list that may span
-/// several header lines, and empty list elements are ignored. A value that is
-/// not visible ASCII names nothing Actus can vouch for, so it counts as one.
-pub(crate) fn has_content_coding(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(http::header::CONTENT_ENCODING)
-        .iter()
-        .any(|value| match value.to_str() {
-            Ok(list) => list
-                .split(',')
+/// The content coding a request body arrives in, per its `Content-Encoding`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContentCoding {
+    /// None, or only `identity` — RFC 9110 §12.5.3's synonym for "no
+    /// encoding".
+    Identity,
+    /// Exactly one `gzip`, or `x-gzip`, its alias (RFC 9110 §8.4.1.3).
+    Gzip,
+    /// Anything else: another coding, codings stacked (`gzip, gzip`), or a
+    /// value that is not visible ASCII and so names nothing Actus can vouch
+    /// for.
+    Other,
+}
+
+/// Read the request's content coding. Codings are case-insensitive (RFC 9110
+/// §8.4.1), the field is a list that may span several header lines, and empty
+/// list elements and `identity` are skipped.
+pub(crate) fn content_coding(headers: &HeaderMap) -> ContentCoding {
+    let mut codings = Vec::new();
+    for value in headers.get_all(http::header::CONTENT_ENCODING) {
+        let Ok(list) = value.to_str() else {
+            return ContentCoding::Other;
+        };
+        codings.extend(
+            list.split(',')
                 .map(str::trim)
-                .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity")),
-            Err(_) => true,
-        })
+                .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("identity")),
+        );
+    }
+    match codings.as_slice() {
+        [] => ContentCoding::Identity,
+        [one] if one.eq_ignore_ascii_case("gzip") || one.eq_ignore_ascii_case("x-gzip") => {
+            ContentCoding::Gzip
+        }
+        _ => ContentCoding::Other,
+    }
 }
 
 /// Whether the request's `Transfer-Encoding` is anything but a lone
@@ -489,27 +731,38 @@ mod tests {
 
     #[test]
     fn identity_and_absence_are_no_content_coding() {
-        let coded =
-            |values: &[&[u8]]| has_content_coding(&lines(http::header::CONTENT_ENCODING, values));
-        assert!(!coded(&[]));
-        assert!(!coded(&[b"identity"]));
-        assert!(!coded(&[b"IDENTITY"]));
-        assert!(!coded(&[b" identity , ,"]));
-        assert!(!coded(&[b""]));
+        let coding =
+            |values: &[&[u8]]| content_coding(&lines(http::header::CONTENT_ENCODING, values));
+        assert_eq!(coding(&[]), ContentCoding::Identity);
+        assert_eq!(coding(&[b"identity"]), ContentCoding::Identity);
+        assert_eq!(coding(&[b"IDENTITY"]), ContentCoding::Identity);
+        assert_eq!(coding(&[b" identity , ,"]), ContentCoding::Identity);
+        assert_eq!(coding(&[b""]), ContentCoding::Identity);
     }
 
     #[test]
-    fn any_other_content_coding_counts() {
-        let coded =
-            |values: &[&[u8]]| has_content_coding(&lines(http::header::CONTENT_ENCODING, values));
-        assert!(coded(&[b"gzip"]));
-        assert!(coded(&[b"GZip"]));
-        assert!(coded(&[b"br"]));
-        assert!(coded(&[b"identity, gzip"]));
+    fn a_single_gzip_is_gzip() {
+        let coding =
+            |values: &[&[u8]]| content_coding(&lines(http::header::CONTENT_ENCODING, values));
+        assert_eq!(coding(&[b"gzip"]), ContentCoding::Gzip);
+        assert_eq!(coding(&[b"GZip"]), ContentCoding::Gzip);
+        assert_eq!(coding(&[b"x-gzip"]), ContentCoding::Gzip);
+        assert_eq!(coding(&[b"identity, gzip"]), ContentCoding::Gzip);
+        assert_eq!(coding(&[b"identity", b"gzip"]), ContentCoding::Gzip);
+    }
+
+    #[test]
+    fn any_other_content_coding_is_other() {
+        let coding =
+            |values: &[&[u8]]| content_coding(&lines(http::header::CONTENT_ENCODING, values));
+        assert_eq!(coding(&[b"br"]), ContentCoding::Other);
         // The field may span several lines; one coding anywhere counts.
-        assert!(coded(&[b"identity", b"zstd"]));
+        assert_eq!(coding(&[b"identity", b"zstd"]), ContentCoding::Other);
+        // Stacked: decoding one gzip would leave the other in the body.
+        assert_eq!(coding(&[b"gzip, gzip"]), ContentCoding::Other);
+        assert_eq!(coding(&[b"gzip", b"br"]), ContentCoding::Other);
         // Not visible ASCII: nothing Actus can vouch for.
-        assert!(coded(&[b"gz\xffip"]));
+        assert_eq!(coding(&[b"gz\xffip"]), ContentCoding::Other);
     }
 
     #[test]

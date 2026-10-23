@@ -12,6 +12,9 @@
 //!   `OPTIONS` answered automatically, `Access-Control-*` on every response
 //! - Response compression via `Server::with_compression(CompressionLayer::new())`
 //!   (gzip/brotli; the `compression` feature is enabled in this example's Cargo.toml)
+//! - gzip request bodies decoded via `Server::with_gzip_request_bodies()` —
+//!   `PUT /files/c/x` with `Content-Encoding: gzip` and a gzip JSON body
+//!   arrives as plain JSON
 //! - A WebSocket echo endpoint (`GET /ws/echo`) via `ws::upgrade(...)`
 //!   (the `websocket` feature is enabled in this example's Cargo.toml)
 //! - A Server-Sent Events endpoint (`GET /events/ticks`) via `reply::sse`
@@ -431,6 +434,9 @@ async fn main() -> anyhow::Result<()> {
         .with_cors(CorsLayer::permissive())
         // gzip/brotli on responses ≥ 1 KiB (requires the `compression` feature).
         .with_compression(CompressionLayer::new())
+        // ...and gzip request bodies decoded, the body cap holding their
+        // decoded size (same feature).
+        .with_gzip_request_bodies()
         .run(3000)
         .await?;
     Ok(())
