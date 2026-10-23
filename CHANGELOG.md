@@ -12,12 +12,13 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ### Added
 
-- **`Server::with_sent_bytes(counter)`** counts the body bytes of every response into an
-  `Arc<AtomicU64>` the caller owns, as each frame is handed to the connection. It counts
-  **after compression**, so the figure is what actually left rather than what the handler
-  built, and it counts every reply: handler successes, middleware short-circuits, errors,
-  and a timed-out request's `504`. A streamed body counts as it streams. Headers, and a
-  connection's bytes after a protocol upgrade, are not counted.
+- **`Server::with_sent_bytes(counter)`** counts every byte the server writes to
+  its connections into an `Arc<AtomicU64>` the caller owns — what actually
+  went out: status lines and headers, bodies after compression, chunked
+  framing, and an upgraded connection's WebSocket frames. Each write is
+  counted as the operating system accepts it, so the count is live, and a
+  response cut short by a disconnect counts only what was written. Request
+  bytes are not counted. Typical use is metering a deployment's egress.
 
 ### Documentation
 
