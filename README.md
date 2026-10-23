@@ -379,7 +379,7 @@ reply::build_reply()
     .done()
 ```
 
-**Brotli quality** is configurable via `CompressionLayer::quality(u32)` — `0` for fastest / loosest, `11` for slowest / tightest. The default is `4`, which is the speed/ratio sweet spot for per-request dynamic content. Quality `11` is 10-100× slower for ~5% additional savings — appropriate for pre-compressed static assets, *not* for per-request work. Values above 11 are clamped. Has no effect on the gzip path (gzip uses `flate2`'s default level).
+**Brotli quality** is configurable via `CompressionLayer::brotli_quality(u32)` — `0` for fastest / loosest, `11` for slowest / tightest. The default is `4`, which is the speed/ratio sweet spot for per-request dynamic content. Quality `11` is 10-100× slower for ~5% additional savings — appropriate for pre-compressed static assets, *not* for per-request work. Values above 11 are clamped. Has no effect on the gzip path (gzip uses `flate2`'s default level).
 
 ## WebSocket
 
