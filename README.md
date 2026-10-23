@@ -381,6 +381,8 @@ reply::build_reply()
 
 **Brotli quality** is configurable via `CompressionLayer::brotli_quality(u32)` — `0` for fastest / loosest, `11` for slowest / tightest. The default is `4`, which is the speed/ratio sweet spot for per-request dynamic content. Quality `11` is 10-100× slower for ~5% additional savings — appropriate for pre-compressed static assets, *not* for per-request work. Values above 11 are clamped. Has no effect on the gzip path (gzip uses `flate2`'s default level).
 
+**Request bodies are not decoded.** Compression applies to responses. A request body sent with a `Content-Encoding` other than `identity` is refused with `415 Unsupported Media Type` and `Accept-Encoding: identity` — RFC 9110's way of asking the client to resend it unencoded — and one sent with a transfer coding besides `chunked` with `501 Not Implemented`. Both happen after routing and before the body is read, with or without the `compression` feature, so a handler never receives encoded bytes as though they were the content.
+
 ## WebSocket
 
 A route handler that wants to serve a WebSocket validates the request as usual (origin, auth, subprotocol — whatever it needs) and then returns `ws::upgrade(...)` instead of an ordinary reply. The server completes the handshake (`101 Switching Protocols`), upgrades the connection, and runs the closure you supplied on the resulting `WebSocket` — a `Stream` of incoming `Message`s and a `Sink` for outgoing ones (re-exported from `tungstenite`).
@@ -1198,6 +1200,7 @@ What's there today:
 ### Not built in
 
 - **Streaming-body compression** — compression covers buffered bodies (including `application/problem+json` errors); a streamed response (including SSE) goes out uncompressed for now.
+- **Request decompression** — an encoded request body is refused, not decoded (see [Compression](#compression)). Decoding, capped on the decoded size so a small body cannot inflate past the body cap, can be added when a consumer needs it.
 - **A rate-limit middleware** — the *policy* (key by what; algorithm; store) is application-specific and the framework can't pick correctly for someone else; see the [rate-limiting pattern](#rate-limiting) for a token-bucket recipe that's three field-types away from a Redis-backed version. What *is* shipped: the 429 + `Retry-After` plumbing (`WebError::TooManyRequests(Option<Duration>)`), the per-controller `#[controller(rate_limit = "class")]` label (`request.rate_limit_class`) that lets one limiter scope by controller without the scope living invisibly in `main()`, and `Router::rate_limit_classes()` for a startup coverage check that turns a typo'd class into a boot failure instead of a silently-unlimited controller.
 - **Service helpers** (DB pools, Redis, JWT) — by design. Services are just types you write; connect to whatever you want.
 
