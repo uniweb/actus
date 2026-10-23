@@ -318,6 +318,43 @@ fn is_json_content_type(ct: &str) -> bool {
     ct == "application/json" || ct.ends_with("+json")
 }
 
+/// Whether the request's `Content-Encoding` names a content coding: anything
+/// but `identity`, which RFC 9110 §12.5.3 makes a synonym for "no encoding".
+/// Codings are case-insensitive (§8.4.1), the field is a list that may span
+/// several header lines, and empty list elements are ignored. A value that is
+/// not visible ASCII names nothing Actus can vouch for, so it counts as one.
+pub(crate) fn has_content_coding(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .any(|value| match value.to_str() {
+            Ok(list) => list
+                .split(',')
+                .map(str::trim)
+                .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity")),
+            Err(_) => true,
+        })
+}
+
+/// Whether the request's `Transfer-Encoding` is anything but a lone
+/// `chunked` — the one transfer coding hyper decodes. hyper refuses a request
+/// whose *last* coding is not `chunked`, but passes `gzip, chunked` with only
+/// the chunked framing removed, leaving the body gzip-coded.
+pub(crate) fn has_undecoded_transfer_coding(headers: &HeaderMap) -> bool {
+    let mut codings = Vec::new();
+    for value in headers.get_all(http::header::TRANSFER_ENCODING) {
+        let Ok(list) = value.to_str() else {
+            return true;
+        };
+        codings.extend(list.split(',').map(str::trim).filter(|c| !c.is_empty()));
+    }
+    match codings.as_slice() {
+        [] => false,
+        [only] => !only.eq_ignore_ascii_case("chunked"),
+        _ => true,
+    }
+}
+
 fn method_to_verb(method: &http::Method) -> Verb {
     match method {
         m if m == http::Method::GET => Verb::GET,
@@ -439,6 +476,54 @@ mod tests {
             Err(other) => panic!("expected BadRequest, got {other:?}"),
             Ok(_) => panic!("must reject non-empty body without Content-Type"),
         }
+    }
+
+    /// Headers holding one `name` line per value.
+    fn lines(name: http::HeaderName, values: &[&[u8]]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(name.clone(), HeaderValue::from_bytes(value).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn identity_and_absence_are_no_content_coding() {
+        let coded =
+            |values: &[&[u8]]| has_content_coding(&lines(http::header::CONTENT_ENCODING, values));
+        assert!(!coded(&[]));
+        assert!(!coded(&[b"identity"]));
+        assert!(!coded(&[b"IDENTITY"]));
+        assert!(!coded(&[b" identity , ,"]));
+        assert!(!coded(&[b""]));
+    }
+
+    #[test]
+    fn any_other_content_coding_counts() {
+        let coded =
+            |values: &[&[u8]]| has_content_coding(&lines(http::header::CONTENT_ENCODING, values));
+        assert!(coded(&[b"gzip"]));
+        assert!(coded(&[b"GZip"]));
+        assert!(coded(&[b"br"]));
+        assert!(coded(&[b"identity, gzip"]));
+        // The field may span several lines; one coding anywhere counts.
+        assert!(coded(&[b"identity", b"zstd"]));
+        // Not visible ASCII: nothing Actus can vouch for.
+        assert!(coded(&[b"gz\xffip"]));
+    }
+
+    #[test]
+    fn a_lone_chunked_is_the_only_transfer_coding_decoded() {
+        let undecoded = |values: &[&[u8]]| {
+            has_undecoded_transfer_coding(&lines(http::header::TRANSFER_ENCODING, values))
+        };
+        assert!(!undecoded(&[]));
+        assert!(!undecoded(&[b"chunked"]));
+        assert!(!undecoded(&[b"Chunked"]));
+        assert!(undecoded(&[b"gzip, chunked"]));
+        // hyper reads only the last line; the field is all of them.
+        assert!(undecoded(&[b"gzip", b"chunked"]));
+        assert!(undecoded(&[b"chunked, chunked"]));
     }
 
     #[test]

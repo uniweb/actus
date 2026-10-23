@@ -7,18 +7,17 @@ use crate::compression::CompressionLayer;
 use crate::cors::CorsLayer;
 use crate::error::ServerError;
 use crate::middleware::{Middleware, MiddlewareChain, Outcome};
-use crate::request::Request;
+use crate::request::{Request, has_content_coding, has_undecoded_transfer_coding};
 use crate::router::Router;
 #[cfg(feature = "websocket")]
 use crate::websocket;
-#[cfg(feature = "websocket")]
-use actus_reply::ProblemDetails;
-use actus_reply::{Finalizer, ReplyData, WebError};
+use actus_reply::{Finalizer, ProblemDetails, ReplyData, WebError};
 use bytes::Bytes;
+use http::{HeaderMap, StatusCode};
 #[cfg(feature = "websocket")]
-use http::{HeaderValue, StatusCode, header};
+use http::{HeaderValue, header};
 use http_body_util::combinators::BoxBody;
-use hyper::body::Incoming;
+use hyper::body::{Body, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
 use std::future::Future;
@@ -620,6 +619,38 @@ impl Server {
         .await
     }
 
+    /// The reply refusing a request whose body would reach the handler still
+    /// encoded, or `None`. Actus decodes no request coding, and a handler must
+    /// never receive encoded bytes as though they were the content: a JSON
+    /// route would fail to parse them, and a route storing bytes would store
+    /// the encoding.
+    ///
+    /// - A transfer coding besides a lone `chunked` is one the server does not
+    ///   understand: `501 Not Implemented` (RFC 9112 §6.1).
+    /// - A content coding other than `identity`: `415 Unsupported Media Type`,
+    ///   with an `Accept-Encoding` naming what would have been accepted (RFC
+    ///   9110 §12.5.3). A request with no body is not refused over the
+    ///   header alone.
+    fn coding_refusal(&self, headers: &HeaderMap, body: &Incoming) -> Option<ReplyData> {
+        if has_undecoded_transfer_coding(headers) {
+            return Some(
+                self.finalizer.error_to_reply(WebError::Problem(
+                    ProblemDetails::new(StatusCode::NOT_IMPLEMENTED, "Not Implemented")
+                        .detail("send the request body with no transfer coding but chunked"),
+                )),
+            );
+        }
+        if !body.is_end_stream() && has_content_coding(headers) {
+            let mut data = self.finalizer.error_to_reply(WebError::Problem(
+                ProblemDetails::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Unsupported Media Type")
+                    .detail("send the request body without a Content-Encoding"),
+            ));
+            data.add_header("Accept-Encoding", "identity");
+            return Some(data);
+        }
+        None
+    }
+
     /// Run the after-middleware chain, then turn the reply into a `Response`
     /// via [`dispatch_reply`](Self::dispatch_reply).
     ///
@@ -738,10 +769,11 @@ impl Server {
     /// [`finalize_reply`](Self::finalize_reply) — handler successes,
     /// `Outcome::Respond` short-circuits, and *every* error (middleware
     /// `Err`, body parse failure, 404 / 405 from the router, handler-returned
-    /// `Err`, even the 413 / 400 from the body-cap path). The after-chain,
-    /// compression, and CORS apply uniformly. CORS preflight is the one
-    /// short-circuit that bypasses the pipeline — it's HTTP-protocol traffic
-    /// rather than an application request.
+    /// `Err`, the 415 / 501 for an encoded body, even the 413 / 400 from the
+    /// body-cap path). The after-chain, compression, and CORS apply
+    /// uniformly. CORS preflight is the one short-circuit that bypasses the
+    /// pipeline — it's HTTP-protocol traffic rather than an application
+    /// request.
     async fn handle_request(
         self: Arc<Self>,
         req: HyperRequest<Incoming>,
@@ -774,7 +806,9 @@ impl Server {
     /// 4. match controller — 404 short-circuits *without* buffering the
     ///    body (efficiency win on adversarial bad-path requests); then stamp
     ///    the matched controller's rate-limit class onto the request, so a
-    ///    `before` middleware (which only gets `&Request`) can read it
+    ///    `before` middleware (which only gets `&Request`) can read it; then
+    ///    refuse a body that would arrive still encoded (`415` / `501`),
+    ///    also without reading it
     /// 5. buffer the body, capped per the resolved policy (today: server-
     ///    wide; soon, per-controller / per-route)
     /// 6. middleware `before`
@@ -865,6 +899,20 @@ impl Server {
             //     buffer so it survives `collect_body` and is present for the
             //     whole pipeline, including the after-chain on error replies.)
             request.rate_limit_class = route_match.controller.actus_rate_limit();
+
+            // 4c. Refuse a body that would reach the handler still encoded
+            //     (`415` / `501`, see `coding_refusal`) — before reading it,
+            //     so the body cap and the inflight budget are never touched.
+            if let Some(data) = self.coding_refusal(&request.headers, &body_stream) {
+                return Ok(self
+                    .finalize_reply(
+                        data,
+                        &request,
+                        #[cfg(feature = "websocket")]
+                        ws_upgrade,
+                    )
+                    .await);
+            }
 
             // 5. Resolve the effective body cap: the matched controller's
             //    `#[controller(max_body_bytes = …)]` if it set one, otherwise

@@ -10,6 +10,27 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Changed
+
+- **A request body that would reach its handler still encoded is refused.**
+  Actus decodes no request coding, yet it handed such a body over as though
+  it were the content: a JSON route failed with a misleading `400` ("body is
+  not valid JSON"), and a route storing bytes stored the encoded ones — a
+  gzip-compressed upload was saved, and served back, as gzip. Now, after
+  routing (an unknown path is still a `404`) and before the body is read:
+
+  - a `Content-Encoding` other than `identity` gets `415 Unsupported Media
+    Type` with `Accept-Encoding: identity` (RFC 9110 §12.5.3), which tells a
+    client to resend the body unencoded; a request with no body is not
+    refused over the header alone;
+  - a `Transfer-Encoding` other than a lone `chunked` gets `501 Not
+    Implemented` (RFC 9112 §6.1). hyper refuses a request whose last coding
+    is not `chunked`, but passed `gzip, chunked` on with only the chunked
+    framing removed.
+
+  Both flow through the after-chain and CORS like any other error.
+  **Behavior change:** such a request used to reach its handler.
+
 ### Added
 
 - **`Server::with_sent_bytes(counter)`** counts every byte the server writes to
