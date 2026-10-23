@@ -50,7 +50,7 @@ tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
 
-Optional features — all off by default: `compression` (gzip/brotli responses), `websocket` (`ws::upgrade`), `openapi` (OpenAPI 3.x generation). Enable with `cargo add actus --features compression,websocket,openapi`.
+Optional features — all off by default: `compression` (gzip/brotli responses, gzip request bodies), `websocket` (`ws::upgrade`), `openapi` (OpenAPI 3.x generation). Enable with `cargo add actus --features compression,websocket,openapi`.
 
 ```rust
 use std::sync::Arc;
@@ -381,7 +381,15 @@ reply::build_reply()
 
 **Brotli quality** is configurable via `CompressionLayer::brotli_quality(u32)` — `0` for fastest / loosest, `11` for slowest / tightest. The default is `4`, which is the speed/ratio sweet spot for per-request dynamic content. Quality `11` is 10-100× slower for ~5% additional savings — appropriate for pre-compressed static assets, *not* for per-request work. Values above 11 are clamped. Has no effect on the gzip path (gzip uses `flate2`'s default level).
 
-**Request bodies are not decoded.** Compression applies to responses. A request body sent with a `Content-Encoding` other than `identity` is refused with `415 Unsupported Media Type` and `Accept-Encoding: identity` — RFC 9110's way of asking the client to resend it unencoded — and one sent with a transfer coding besides `chunked` with `501 Not Implemented`. Both happen after routing and before the body is read, with or without the `compression` feature, so a handler never receives encoded bytes as though they were the content.
+**Request bodies are decoded only when you ask.** By default, a request body sent with a `Content-Encoding` other than `identity` is refused with `415 Unsupported Media Type` and `Accept-Encoding: identity` — RFC 9110's way of asking the client to resend it unencoded — and one sent with a transfer coding besides `chunked` with `501 Not Implemented`. Both happen after routing and before the body is read, so a handler never receives encoded bytes as though they were the content.
+
+`Server::with_gzip_request_bodies()` decodes gzip instead. The handler gets the content, with `Content-Encoding` and `Content-Length` removed, and **the body cap applies to the decoded size** as well as to the coded bytes read: a few KB of gzip that would decode to gigabytes is a `413` the moment its output passes the cap. Decoding is streamed, so memory stays at the cap; a corrupt or truncated stream is a `400`; and any other coding, or codings stacked, is still a `415` — now with `Accept-Encoding: gzip, identity`. Middleware sees the decoded body, so a check over the bytes as sent (a webhook signature) needs a sender that does not compress. Requires the `compression` feature.
+
+```rust
+Server::new(router)
+    .with_compression(CompressionLayer::new())   // responses
+    .with_gzip_request_bodies()                  // requests
+```
 
 ## WebSocket
 
@@ -1186,7 +1194,7 @@ What's there today:
 - **Longest-prefix routing** at arbitrary depth, with multi-segment patterns inside controllers and a trailing `{...rest}` catch-all path parameter.
 - **Query as a multimap** — repeated keys accumulate; `Vec<String>` params get all values; `params.query()` for "catch the rest". Form-urlencoded bodies fold into the same map.
 - **CORS** — `Server::with_cors(CorsLayer::…)`: preflight `OPTIONS` answered automatically, `Access-Control-*` on every cross-origin response.
-- **Response compression** — `Server::with_compression(CompressionLayer::…)`: gzip/brotli, content-type- and size-gated (behind the `compression` feature).
+- **Response compression** — `Server::with_compression(CompressionLayer::…)`: gzip/brotli, content-type- and size-gated (behind the `compression` feature). `Server::with_gzip_request_bodies()` decodes gzip request bodies, the body cap holding their decoded size.
 - **Streaming responses** — `reply!(stream: …)` writes a chunked body from any byte stream.
 - **Server-Sent Events** — `reply!(sse: events)` / `reply::sse(...)` with an `SseEvent` builder (multi-line `data`, `event`/`id`/`retry`, comment-line heartbeats); sets `Content-Type` and `Cache-Control` for you.
 - **WebSocket** — `ws::upgrade(...)` from a route handler: the server does the handshake and runs your closure on the connection (behind the `websocket` feature).
@@ -1200,7 +1208,7 @@ What's there today:
 ### Not built in
 
 - **Streaming-body compression** — compression covers buffered bodies (including `application/problem+json` errors); a streamed response (including SSE) goes out uncompressed for now.
-- **Request decompression** — an encoded request body is refused, not decoded (see [Compression](#compression)). Decoding, capped on the decoded size so a small body cannot inflate past the body cap, can be added when a consumer needs it.
+- **Request decoding beyond gzip** — `with_gzip_request_bodies()` decodes gzip; a brotli or zstd request body is refused with `415` (see [Compression](#compression)). A brotli stream declares its own window, up to 16 MiB, so decoding it needs its own bound before it is accepted.
 - **A rate-limit middleware** — the *policy* (key by what; algorithm; store) is application-specific and the framework can't pick correctly for someone else; see the [rate-limiting pattern](#rate-limiting) for a token-bucket recipe that's three field-types away from a Redis-backed version. What *is* shipped: the 429 + `Retry-After` plumbing (`WebError::TooManyRequests(Option<Duration>)`), the per-controller `#[controller(rate_limit = "class")]` label (`request.rate_limit_class`) that lets one limiter scope by controller without the scope living invisibly in `main()`, and `Router::rate_limit_classes()` for a startup coverage check that turns a typo'd class into a boot failure instead of a silently-unlimited controller.
 - **Service helpers** (DB pools, Redis, JWT) — by design. Services are just types you write; connect to whatever you want.
 
