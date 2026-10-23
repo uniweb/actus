@@ -10,6 +10,8 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+## [1.9.0]
+
 ### Added
 
 - **`Server::with_gzip_request_bodies()`** decodes gzip request bodies
@@ -348,7 +350,8 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/uniweb/actus/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/uniweb/actus/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/uniweb/actus/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/uniweb/actus/compare/v1.5.0...v1.6.0
