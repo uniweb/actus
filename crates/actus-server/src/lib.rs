@@ -7,6 +7,7 @@
 //! remaining path segment (the "action") to that controller's dispatcher.
 #![warn(missing_docs)]
 
+mod access_log;
 #[cfg(feature = "compression")]
 pub mod compression;
 pub mod cors;

@@ -19,8 +19,10 @@
 //!   (the `websocket` feature is enabled in this example's Cargo.toml)
 //! - A Server-Sent Events endpoint (`GET /events/ticks`) via `reply::sse`
 //!   with multi-line data, a heartbeat comment, and a `retry:` hint
-//! - `RequestLogger` middleware, plus a `MaintenanceMode` middleware that
-//!   short-circuits with `503` via `Outcome::Respond` when `X-Maintenance` is set
+//! - The access log (`Server::with_access_log()`): one line per response,
+//!   written when it ends, with its status and time
+//! - A `MaintenanceMode` middleware that short-circuits with `503` via
+//!   `Outcome::Respond` when `X-Maintenance` is set
 //! - A `prepare = Self::check_auth` hook that resolves a `User` from the
 //!   `Authorization` header. Per-handler access decisions (admin-only,
 //!   etc.) live in the handlers themselves — actus is policy-agnostic.
@@ -425,8 +427,10 @@ async fn main() -> anyhow::Result<()> {
         .expect("openapi_spec only set once, here in main()");
 
     Server::new(router)
-        .with_middleware(RequestLogger)
-        // Runs after the logger, so even maintenance-mode requests get logged;
+        // One line per response, when it ends. The server writes it, not a
+        // middleware, so maintenance-mode 503s, 404s and preflights are all
+        // logged with nothing to order.
+        .with_access_log()
         // `before` returning `Outcome::Respond` short-circuits the handler.
         .with_middleware(MaintenanceMode)
         // Wide-open CORS — fine for a demo; a real app would pin the origin

@@ -1,16 +1,17 @@
-//! A request logger: one `tracing` event for each request, when its reply is ready.
+//! A request logger that emits a `tracing` event for each request as it is routed.
 
-use crate::middleware::Middleware;
+use crate::middleware::{Middleware, Outcome};
 use crate::request::Request;
-use actus_reply::{ReplyData, WebError};
+use actus_reply::WebError;
 use async_trait::async_trait;
 use tracing::info;
 
-/// Logs every request via `tracing` once its reply is ready: the method, the routed path, the
-/// reply's status and the milliseconds since the request arrived, as
+/// Logs each request via `tracing` from its `before` hook: the method and the routed path, as
+/// the request reaches the middleware chain, before its handler runs. A request that never
+/// finishes still leaves its line.
 ///
 /// ```text
-/// request method=GET path=/users/7 status=200 elapsed_ms=1.284
+/// request method=GET path=/users/7
 /// ```
 ///
 /// Add it to the server with `Server::with_middleware(RequestLogger)`:
@@ -23,31 +24,21 @@ use tracing::info;
 ///     .run(3000).await?;
 /// ```
 ///
-/// - **When:** from its `after` hook, which runs on every reply but a CORS preflight and a
-///   completed WebSocket handshake — a `404` from the router, a refused body and a
-///   short-circuiting middleware included. Add it **first**: `after` hooks run in reverse, so
-///   it then reports the reply as every other middleware left it.
-/// - **Who:** the event is emitted inside the request's span, so a field the application
-///   records there ([`Server::with_request_span`](crate::Server::with_request_span)), such as
-///   the caller it resolved, is printed with it.
+/// It sees no reply, so it logs no status and no time. A request answered before the `before`
+/// chain runs (a `404` from the router, a refused body, a CORS preflight), or by a `before`
+/// hook registered ahead of it, leaves no line. For one line per response, with its status
+/// and how long it took, written when it ends for every response the server sends, use the
+/// server's access log, [`Server::with_access_log`](crate::Server::with_access_log).
 pub struct RequestLogger;
 
 #[async_trait]
 impl Middleware for RequestLogger {
-    async fn after(&self, request: &Request, response: &mut ReplyData) -> Result<(), WebError> {
-        let path = format!("/{}", request.path_parts.join("/"));
-        let status = response.status_code().as_u16();
-        match crate::server::request_elapsed() {
-            Some(elapsed) => info!(
-                method = %request.method,
-                path = %path,
-                status,
-                // Milliseconds to the microsecond: most replies take under one.
-                elapsed_ms = (elapsed.as_secs_f64() * 1_000_000.0).round() / 1000.0,
-                "request",
-            ),
-            None => info!(method = %request.method, path = %path, status, "request"),
-        }
-        Ok(())
+    async fn before(&self, request: &mut Request) -> Result<Outcome, WebError> {
+        info!(
+            method = %request.method,
+            path = %format!("/{}", request.path_parts.join("/")),
+            "request",
+        );
+        Ok(Outcome::Continue)
     }
 }

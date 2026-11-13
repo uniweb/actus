@@ -48,6 +48,12 @@
 //!   declares nothing and is mounted outside every family — unconstrained
 //!   by construction. The `families { "api" => [...] }` block on `app_routes!`
 //!   moves the presence check (and the accepted-floor check) to compile time.
+//! - **The caller on the access log** (README §"Access log") — `request_span`
+//!   makes each request's span from the request (its `X-Request-Id`) with a
+//!   `user` field declared `Empty`; `lax_auth` records the user it resolved
+//!   there; `Server::with_access_log()` writes one line per response inside
+//!   that span. So each line names who asked, without the framework knowing
+//!   what a user is, and a timed-out request's `504` is logged with its caller.
 //!
 //! The integration tests in `tests/integration.rs` exercise the daemon-guard
 //! pattern: spawn this binary as a subprocess, run real HTTP requests, let
@@ -265,12 +271,32 @@ fn resolve_token(token: &str) -> Option<User> {
 
 /// Anonymous requests pass through; a token that doesn't resolve returns
 /// `Unauthorized`. Handlers that need a user call `params.require_user()`.
+///
+/// The user is also recorded on the request's span (`request_span` declares
+/// the field), so the access-log line, and every other event the request
+/// emits, names who asked.
 async fn lax_auth(params: &mut Params) -> Result<Option<ReplyData>, WebError> {
     if let Some(token) = params.bearer_token() {
         let user = resolve_token(token).ok_or(WebError::Unauthorized)?;
+        tracing::Span::current().record("user", tracing::field::display(&user.name));
         params.insert(user);
     }
     Ok(None)
+}
+
+/// Each request's span: its `X-Request-Id`, set from the request as it
+/// arrives (so even a router `404`'s line has it), and the `user` that
+/// `lax_auth` records once it knows.
+fn request_span(req: &Request) -> tracing::Span {
+    let id = req
+        .headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok());
+    tracing::info_span!(
+        "request",
+        id = %id.unwrap_or("-"),
+        user = tracing::field::Empty,
+    )
 }
 
 trait AuthParamsExt {
@@ -838,7 +864,10 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("listening on http://{}", listener.local_addr()?);
     server
-        .with_middleware(RequestLogger)
+        // One line per response, when it ends, inside the span `request_span`
+        // makes, so it names the caller `lax_auth` resolved.
+        .with_request_span(request_span)
+        .with_access_log()
         .with_middleware(limiter)
         .with_middleware(floor_gate)
         .with_cors(CorsLayer::permissive())

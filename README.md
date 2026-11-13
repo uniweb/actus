@@ -475,7 +475,7 @@ Requires the `openapi` feature — `actus = { version = "…", features = ["open
 
 ## Middleware
 
-`Server::with_middleware(...)` registers a `Middleware` — for *application* cross-cutting concerns (logging, auth gates, request IDs, maintenance mode, caching, …). HTTP-protocol concerns (CORS, body limits, compression) are named server features and live outside the chain — see [Principles](#design-principles), point 1. Implement either hook (both have default no-op impls):
+`Server::with_middleware(...)` registers a `Middleware` — for *application* cross-cutting concerns (application logging, auth gates, request IDs, maintenance mode, caching, …). HTTP-protocol concerns (CORS, body limits, compression, the [access log](#access-log)) are named server features and live outside the chain — see [Principles](#design-principles), point 1. Implement either hook (both have default no-op impls):
 
 ```rust
 use actus::prelude::*;
@@ -502,14 +502,51 @@ impl Middleware for StampTraceId {
 
 `before` runs in registration order; `after` runs in reverse, so a middleware wraps the ones added after it (`[A, B]`: `A.before`, `B.before`, handler, `B.after`, `A.after`). `before` returns `Outcome::Continue` (proceed), `Outcome::Respond(reply)` (short-circuit with a normal response — the handler and any remaining `before` hooks are skipped), or `Err(WebError)` (short-circuit with an error response).
 
-**The `after` chain runs on every reply with a body and a request** — handler successes, `Outcome::Respond` short-circuits, *and* every error: a `before` hook's `Err`, a 400 from a malformed body, a 404 / 405 from the router, a handler-returned `Err(WebError)`, even the 413 from the body-size cap (the request skeleton is preserved even when body collection fails). A request-id stamper, a response logger, an audit hook — anything in `after` — sees them all. Compression and CORS also apply uniformly.
+**The `after` chain runs on every reply with a body and a request** — handler successes, `Outcome::Respond` short-circuits, *and* every error: a `before` hook's `Err`, a 400 from a malformed body, a 404 / 405 from the router, a handler-returned `Err(WebError)`, even the 413 from the body-size cap (the request skeleton is preserved even when body collection fails). A request-id stamper, an audit hook — anything in `after` — sees them all. Compression and CORS also apply uniformly. (For a record of every response the server sends, the exceptions below included, use the [access log](#access-log).)
 
 The exceptions:
 - **WebSocket upgrade success (`101 Switching Protocols`)** — no HTTP body to decorate, and the upgrade machinery consumes the connection. (The 426 fallback when a handler returns `ws::upgrade(...)` but the request isn't a real handshake *does* run through the after-chain — it's a normal HTTP error.)
 - **CORS preflight (`204`)** — HTTP-protocol traffic, not an application request (see the CORS section).
+- **A request timeout's `504`** — `Server::with_request_timeout` answers it one-shot: something upstream was unresponsive, and running more code risks hanging again.
+- **An `after` hook's own error** — the chain stops at the first `after` that returns `Err`, and the reply becomes that error's response, sent without the hooks that had not run yet.
 - **Pre-parse failures** — a request hyper itself can't parse never reaches the `Request` skeleton, so there's nothing to hand the hook.
 
-`after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.). To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter. Header names are case-insensitive: `add_header` replaces a header of the same name in any letter case, and `response.header(name)` reads one back the same way — so a hook that sets a *default* checks `header(name).is_none()` first and leaves the handler's own choice standing. [`docs/guides/cache-control.md`](docs/guides/cache-control.md) works that pattern through for `Cache-Control`.
+`after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.), and `response.status()` gives the status the reply stands to be sent with. To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter. Header names are case-insensitive: `add_header` replaces a header of the same name in any letter case, and `response.header(name)` reads one back the same way — so a hook that sets a *default* checks `header(name).is_none()` first and leaves the handler's own choice standing. [`docs/guides/cache-control.md`](docs/guides/cache-control.md) works that pattern through for `Cache-Control`.
+
+## Access log
+
+`Server::with_access_log()` writes one `tracing` event for every response the server sends, when the response ends, at `INFO` under the target `actus::access`:
+
+```text
+INFO request{user=7}: actus::access: method=GET path=/api/users/7 status=200 elapsed_ms=1.284
+```
+
+- **Every response, with the status sent** — handler replies and errors, a 404 from the router, a refused body, a CORS preflight, a WebSocket handshake's 101, a request timeout's 504, and the 500 an `after` hook's error is turned into. Only a request hyper rejects before the server sees it (malformed HTTP) goes unlogged: hyper answers it itself.
+- **When it ends** — `elapsed_ms` runs from when the server took the request to when the response's last frame went to the connection, or the connection gave up on it (the client left, the drain deadline passed). A streamed response is logged when its stream ends — an SSE line when the client disconnects — and its time is the stream's whole life.
+- **Nothing to order.** It is a server feature, not a middleware: the server writes it after everything that can change a reply. (Why: [Design principles](#design-principles), point 1.)
+- **Its own target**, so a filter can route or silence it: `EnvFilter::new("info,actus::access=off")`.
+
+The path is the routed one, after a [host alias](#host-aliases), without the query string, which can carry secrets.
+
+**Request span.** Every request runs in a `tracing` span, `request` by default, and so does its access-log event. `Server::with_request_span(make)` names your own: `make` gets the `Request` as it arrived (method, path, query and headers, before routing and before the body is read). A field set there from the request, a correlation id say, is on the line of every reply, the router's 404 included. A field declared `Empty` and recorded where the request learns it, such as the caller a `prepare` hook resolved, is on the line of every request that got that far:
+
+```rust
+use tracing::field::Empty;
+
+let server = Server::new(router)
+    .with_request_span(|req: &Request| {
+        let id = req.headers.get("x-request-id").and_then(|v| v.to_str().ok());
+        tracing::info_span!("request", id = %id.unwrap_or("-"), user = Empty)
+    })
+    .with_access_log();
+
+// In a `prepare` hook, once the caller is known:
+tracing::Span::current().record("user", user.id);
+```
+
+That is how the application puts its own facts on the access log without the framework knowing what a caller is. A field never recorded is left out of the line. Every other event the request emits, from middleware, the handler or the server, carries the same fields.
+
+`RequestLogger`, the middleware, is a different instrument: it writes `request method=GET path=/api/users/7` from its `before` hook as the request is routed, before its handler runs. So a request that never finishes still leaves a line, but there's no status, and the replies `before` never sees (a router 404, a refused body) get no line.
 
 ## Route families
 
@@ -1213,8 +1250,9 @@ What's there today:
 - **Distinct 404 / 405** based on whether path-only or path+verb didn't match; the `405` carries an `Allow` header.
 - **Structured error responses** via `WebError::Problem(ProblemDetails)` — RFC 7807 `application/problem+json` with arbitrary extension members.
 - **`429 Too Many Requests` plumbing** — `WebError::TooManyRequests(Option<Duration>)` sets the status and, when the hint is present, the `Retry-After` header + a `retry_after_seconds` extra in the problem body. The framework also surfaces a per-controller rate-limit **class** (`#[controller(rate_limit = "name")]` → `request.rate_limit_class`) so a limiter middleware can scope by controller. (The limiter itself is application policy; see the rate-limiting pattern.)
-- **Middleware** — `before` / `after` hooks via `Server::with_middleware(...)`; `before` can `Outcome::Continue`, `Outcome::Respond(reply)` (short-circuit), or `Err`. The `after` chain runs on *every* reply with a body and a request — successes, short-circuits, and every error path (404 / 405 / 400 / 401 / 413 / handler-returned `Err`). Ships `RequestLogger`, which writes one `tracing` event per request once its reply is ready: method, routed path, status and `elapsed_ms`.
-- **Request span** — every request runs in a `tracing` span, `request` by default. `Server::with_request_span(make)` names your own, so a field declared on it `Empty` and recorded as the request learns it (the caller a `prepare` hook resolved, say) is printed with every event the request emits, `RequestLogger`'s included.
+- **Middleware** — `before` / `after` hooks via `Server::with_middleware(...)`; `before` can `Outcome::Continue`, `Outcome::Respond(reply)` (short-circuit), or `Err`. The `after` chain runs on *every* reply with a body and a request — successes, short-circuits, and every error path (404 / 405 / 400 / 401 / 413 / handler-returned `Err`). Ships `RequestLogger`, which logs each request as it is routed.
+- **Access log** — `Server::with_access_log()`: one `tracing` event per response, written by the server when the response ends, with the method, routed path, status sent and `elapsed_ms`. It covers every response, a timeout's 504, a preflight and a 101 included, under the target `actus::access`. See [Access log](#access-log).
+- **Request span** — every request runs in a `tracing` span, `request` by default. `Server::with_request_span(make)` makes your own from the request as it arrived, so a correlation id from a header, or the caller a `prepare` hook records, rides on every event the request emits, the access log's included.
 - **OpenAPI 3.1 generation** — `actus::openapi::generate(&router, options, filter)`: walks the route tree and emits a spec as `serde_json::Value`, with a mount-path predicate to filter which routes are documented (behind the `openapi` feature).
 
 ### Not built in

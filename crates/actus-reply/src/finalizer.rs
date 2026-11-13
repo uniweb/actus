@@ -260,11 +260,11 @@ mod tests {
         assert_eq!(body["allowed_methods"], serde_json::json!(["GET", "POST"]));
     }
 
-    /// `ReplyData::status_code` names the status the finalizer sends, for every payload kind
-    /// a response is built from and for an error turned into a reply — so an access log that
-    /// reports `status_code()` reports what the client received.
+    /// `ReplyData::status` names the status the finalizer sends, for every payload kind a
+    /// response is built from, for an error turned into a reply, and after `set_status` — so
+    /// an `after` hook that decides from `status()` decides from what would be sent.
     #[tokio::test]
-    async fn status_code_is_the_status_the_finalizer_sends() {
+    async fn status_is_the_status_the_finalizer_sends() {
         let rich = |payload: ReplyData, status: Option<StatusCode>| {
             ReplyData::Rich(Box::new(ReplySpec {
                 payload,
@@ -291,10 +291,15 @@ mod tests {
                 "an error",
                 Finalizer::new().error_to_reply(WebError::NotFound),
             ),
+            ("set_status on a plain reply", {
+                let mut data = ReplyData::Json(serde_json::json!({ "a": 1 }));
+                data.set_status(StatusCode::ACCEPTED);
+                data
+            }),
         ];
         let finalizer = Finalizer::new();
         for (case, data) in cases {
-            let said = data.status_code();
+            let said = data.status();
             let sent = finalizer.build_response(data).await.status();
             assert_eq!(said, sent, "{case}");
         }

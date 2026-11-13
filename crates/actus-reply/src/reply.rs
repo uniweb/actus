@@ -95,21 +95,24 @@ impl PartialEq for ReplyData {
 pub type Reply = Result<ReplyData, WebError>;
 
 impl ReplyData {
-    /// The status the [`Finalizer`](crate::Finalizer) sends for this reply: `204` for
-    /// [`Empty`](Self::Empty); `200` for [`Json`](Self::Json), [`Bytes`](Self::Bytes) and
-    /// [`Stream`](Self::Stream); a [`Rich`](Self::Rich) reply's own status, else its payload's;
-    /// and `101` for an [`Upgrade`](Self::Upgrade), which the server answers with the
-    /// handshake.
+    /// The status this reply will be sent with, as the [`Finalizer`](crate::Finalizer)
+    /// sends it: `204` for [`Empty`](Self::Empty); `200` for [`Json`](Self::Json),
+    /// [`Bytes`](Self::Bytes) and [`Stream`](Self::Stream); a [`Rich`](Self::Rich) reply's own
+    /// status, else its payload's. An [`Upgrade`](Self::Upgrade) is `101`, the status the
+    /// server answers a WebSocket handshake with.
     ///
-    /// For code that reports a reply rather than builds one, such as an access log in a
-    /// middleware `after` hook, so it states the code the client receives.
-    pub fn status_code(&self) -> http::StatusCode {
+    /// The reader to [`set_status`](Self::set_status), as [`header`](Self::header) is to
+    /// [`add_header`](Self::add_header), so an `after` hook can decide from it (a header for
+    /// successes only, say). A hook that runs after it can still change the status; for the
+    /// status a client was actually sent, see the server's access log
+    /// (`Server::with_access_log`), which records it once nothing can change it.
+    pub fn status(&self) -> http::StatusCode {
         match self {
             ReplyData::Empty => http::StatusCode::NO_CONTENT,
             ReplyData::Json(_) | ReplyData::Bytes { .. } | ReplyData::Stream(_) => {
                 http::StatusCode::OK
             }
-            ReplyData::Rich(spec) => spec.status.unwrap_or_else(|| spec.payload.status_code()),
+            ReplyData::Rich(spec) => spec.status.unwrap_or_else(|| spec.payload.status()),
             ReplyData::Upgrade(_) => http::StatusCode::SWITCHING_PROTOCOLS,
         }
     }

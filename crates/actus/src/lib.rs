@@ -127,8 +127,10 @@
 //!   Events; `WebError` for structured RFC 7807 `application/problem+json`.
 //! - **HTTP-protocol features** — `Server::with_cors`, `with_compression`
 //!   (gzip/brotli) and `with_gzip_request_bodies` (both behind the
-//!   `compression` feature), a per-request timeout, and three DoS guards (max
-//!   connections, in-flight body budget, header-read timeout).
+//!   `compression` feature), a per-request timeout, three DoS guards (max
+//!   connections, in-flight body budget, header-read timeout), and an access
+//!   log (`with_access_log`: one `tracing` event per response, written when
+//!   it ends, inside the request's span — see `with_request_span`).
 //! - **WebSocket** (`websocket` feature) — `ws::upgrade(...)` from a handler.
 //! - **OpenAPI 3.x** (`openapi` feature) — `openapi::generate(...)` walks the
 //!   route tree and emits a spec.

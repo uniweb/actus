@@ -1,7 +1,9 @@
 //! [`Server`] — the hyper-based HTTP server that owns the request lifecycle:
-//! routing, body limiting, the middleware chain, CORS, compression, and the
-//! HTTP-correctness stamping (`Allow`, `Vary`), with graceful shutdown.
+//! routing, body limiting, the middleware chain, CORS, compression, the
+//! HTTP-correctness stamping (`Allow`, `Vary`) and the access log, with
+//! graceful shutdown.
 
+use crate::access_log;
 #[cfg(feature = "compression")]
 use crate::compression::CompressionLayer;
 use crate::cors::CorsLayer;
@@ -36,22 +38,8 @@ use tracing::{Instrument, Level, error, info, span, warn};
 
 type ResponseBody = BoxBody<Bytes, WebError>;
 
-tokio::task_local! {
-    /// When the request being served arrived — set around each request's handling, so
-    /// anything that runs inside it (the middleware hooks, the handler) can tell how long it
-    /// has taken.
-    static REQUEST_STARTED: Instant;
-}
-
-/// How long the request being served has been in hand, or `None` outside a request.
-pub(crate) fn request_elapsed() -> Option<Duration> {
-    REQUEST_STARTED.try_with(|started| started.elapsed()).ok()
-}
-
-/// The span a request runs in when the application names none ([`Server::with_request_span`]).
-fn default_request_span() -> tracing::Span {
-    span!(Level::INFO, "request")
-}
+/// Makes a request's span from the request as it arrived ([`Server::with_request_span`]).
+type MakeSpan = Box<dyn Fn(&Request) -> tracing::Span + Send + Sync>;
 
 /// One kibibyte (1024 bytes). For readable byte-size limits, e.g.
 /// `#[controller(max_body_bytes = 4 * KIB)]`.
@@ -113,8 +101,12 @@ pub struct Server {
     /// ([`Server::with_gzip_request_bodies`]). `false` by default.
     #[cfg(feature = "compression")]
     gzip_request_bodies: bool,
-    /// Makes the span each request runs in ([`Server::with_request_span`]).
-    request_span: fn() -> tracing::Span,
+    /// `Some(make)`: each request runs in the span `make` makes from it
+    /// ([`Server::with_request_span`]). `None`: in `span!(Level::INFO, "request")`.
+    request_span: Option<MakeSpan>,
+    /// `true`: one `tracing` event per response, written when it ends
+    /// ([`Server::with_access_log`]). `false` by default.
+    access_log: bool,
 }
 
 impl Server {
@@ -138,7 +130,8 @@ impl Server {
             sent_bytes: None,
             #[cfg(feature = "compression")]
             gzip_request_bodies: false,
-            request_span: default_request_span,
+            request_span: None,
+            access_log: false,
         }
     }
 
@@ -168,28 +161,66 @@ impl Server {
         Arc::clone(&self.router)
     }
 
-    /// Names the span each request runs in, made by `make` as the request arrives. The
-    /// default is `span!(Level::INFO, "request")`.
+    /// Writes an access log: one `tracing` event for every response the server sends, when
+    /// the response ends, at `INFO` under the target `actus::access`:
     ///
-    /// Every `tracing` event emitted while the request is served — by middleware, by the
-    /// handler, by [`RequestLogger`](crate::middleware::RequestLogger) — runs inside this
-    /// span, so a field declared on it and recorded as the request learns its value rides on
-    /// each of them. Declare such a field `Empty` and record it where it becomes known:
-    ///
-    /// ```ignore
-    /// fn request_span() -> tracing::Span {
-    ///     tracing::info_span!("request", user = tracing::field::Empty)
-    /// }
-    ///
-    /// let server = Server::new(router).with_request_span(request_span);
-    ///
-    /// // later, in a `prepare` hook, once the caller is known:
-    /// tracing::Span::current().record("user", tracing::field::display(&user_id));
+    /// ```text
+    /// INFO request{user=7}: actus::access: method=GET path=/users/7 status=200 elapsed_ms=1.284
     /// ```
     ///
-    /// A field that is never recorded is left out of the output.
-    pub fn with_request_span(mut self, make: fn() -> tracing::Span) -> Self {
-        self.request_span = make;
+    /// - **Every response, with the status sent**: handler replies and errors, a `404` from
+    ///   the router, a refused body, a CORS preflight, a WebSocket handshake's `101`, the `504`
+    ///   of [`Server::with_request_timeout`], and the `500` an `after` hook's error is turned
+    ///   into. Only a request hyper rejects before the server sees it (malformed HTTP) goes
+    ///   unlogged: hyper answers it itself.
+    /// - **When it ends**: `elapsed_ms` runs from when the server took the request to when the
+    ///   response's last frame went to the connection, or the connection gave up on it (the
+    ///   client left, the drain deadline passed). A streamed response is logged when its
+    ///   stream ends, its whole life as its time.
+    /// - **Inside the request's span**, so a field the application records there, such as
+    ///   the caller a `prepare` hook resolved, is printed with it
+    ///   ([`Server::with_request_span`]).
+    ///
+    /// The path is the routed one, after a host alias, without the query string, which can
+    /// carry secrets. The server writes the event after everything that can change a reply,
+    /// so unlike a middleware there is no place in a chain to get right.
+    pub fn with_access_log(mut self) -> Self {
+        self.access_log = true;
+        self
+    }
+
+    /// Names the span each request runs in, made by `make` from the request as it arrived:
+    /// its method, path (after a host alias), query and headers, before it is routed and
+    /// before its body is read. The default is `span!(Level::INFO, "request")`.
+    ///
+    /// Everything the server does for the request runs inside this span (middleware, the
+    /// `prepare` hook, the handler, a request timeout's `504`), and the
+    /// [access log](Server::with_access_log) is written in it. So a field declared on the
+    /// span rides on every event the request emits. Set it from the request in `make`, or
+    /// declare it `Empty` and record it where it becomes known:
+    ///
+    /// ```ignore
+    /// use tracing::field::Empty;
+    ///
+    /// let server = Server::new(router)
+    ///     .with_request_span(|req: &Request| {
+    ///         let id = req.headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    ///         tracing::info_span!("request", id = %id.unwrap_or("-"), user = Empty)
+    ///     })
+    ///     .with_access_log();
+    ///
+    /// // later, in a `prepare` hook, once the caller is known:
+    /// tracing::Span::current().record("user", user_id);
+    /// ```
+    ///
+    /// A field set from the request is on the line of every reply, a `404` from the router
+    /// included; one recorded in `prepare` is on the lines of requests that reached it. A
+    /// field never recorded is left out.
+    pub fn with_request_span(
+        mut self,
+        make: impl Fn(&Request) -> tracing::Span + Send + Sync + 'static,
+    ) -> Self {
+        self.request_span = Some(Box::new(make));
         self
     }
 
@@ -853,13 +884,21 @@ impl Server {
         response
     }
 
-    /// Handles an individual incoming `hyper::Request`.
+    /// Handles an individual incoming `hyper::Request`: takes it in (steps 1–2 of
+    /// the lifecycle listed on [`handle_request_inner`](Self::handle_request_inner)),
+    /// makes its span, and runs the rest of the pipeline inside that span, under
+    /// the per-request timeout when one is configured
+    /// ([`Server::with_request_timeout`]). With the access log on
+    /// ([`Server::with_access_log`]), hyper gets the response's body wrapped, so
+    /// the request's event is written when the response ends.
     ///
-    /// Wraps [`handle_request_inner`](Self::handle_request_inner) in a
-    /// per-request timeout when one is configured (see
-    /// [`Server::with_request_timeout`]); a timed-out request gets a
-    /// one-shot `504 Gateway Timeout` (no after-chain, since by definition
-    /// something upstream was unresponsive).
+    /// A timed-out request gets a one-shot `504 Gateway Timeout`: no
+    /// after-chain, since by definition something upstream was unresponsive. It
+    /// is still answered inside the request's span, and still logged.
+    ///
+    /// Taking the request in happens before the timer starts and before the span
+    /// exists: it is synchronous and reads no body, so the timer could not cut it
+    /// short anyway, and the span is made from the request it produces.
     ///
     /// Every reply with a `Request` flows through
     /// [`finalize_reply`](Self::finalize_reply) — handler successes,
@@ -872,32 +911,97 @@ impl Server {
     /// request.
     async fn handle_request(
         self: Arc<Self>,
-        req: HyperRequest<Incoming>,
+        #[allow(unused_mut)] mut req: HyperRequest<Incoming>,
     ) -> Result<HyperResponse<ResponseBody>, hyper::Error> {
-        let timeout = self.request_timeout;
-        let app = self.clone();
-        let inner = app.handle_request_inner(req);
-        match timeout {
-            None => inner.await,
-            Some(d) => match tokio::time::timeout(d, inner).await {
-                Ok(r) => r,
+        let started = Instant::now();
+
+        // 1. Capture the WS upgrade handshake (if any) before
+        //    `from_hyper_parts` consumes the request: the `OnUpgrade`
+        //    future and the derived `Sec-WebSocket-Accept`. (See
+        //    `websocket` module docs for why this happens up front.)
+        #[cfg(feature = "websocket")]
+        let ws_upgrade: Option<(hyper::upgrade::OnUpgrade, HeaderValue)> =
+            if websocket::is_upgrade_request(req.method(), req.headers()) {
+                websocket::accept_key(req.headers())
+                    .map(|accept| (hyper::upgrade::on(&mut req), accept))
+            } else {
+                None
+            };
+
+        // 2. Build the skeleton (method / path / query / headers); the
+        //    body stream is held aside for step 5.
+        //
+        //    A host alias is applied here, before anything else sees the
+        //    request: from now on, for the span, the router, every middleware
+        //    and the handler, it *is* the request for the aliased path. With
+        //    no aliases registered this is the only host work there is — one
+        //    check; `Host` is not even read. The host is read before the
+        //    skeleton takes the request, because an absolute-form request's
+        //    authority is in the URI, which the skeleton does not keep.
+        let (request, body_stream, alias_prefix) = if self.router.has_host_aliases() {
+            let hit = self.router.host_alias_hit(req.uri(), req.headers());
+            let (mut request, body_stream) = Request::from_hyper_parts(req);
+            let alias_prefix = hit.and_then(|hit| hit.apply(&mut request.path_parts));
+            (request, body_stream, alias_prefix)
+        } else {
+            let (request, body_stream) = Request::from_hyper_parts(req);
+            (request, body_stream, None)
+        };
+
+        // The request's span, made from the request as it arrived. Everything
+        // from here on runs in it, the access-log event included.
+        let span = match &self.request_span {
+            Some(make) => make(&request),
+            None => span!(Level::INFO, "request"),
+        };
+        // What the access-log event says about the request, taken before the
+        // request moves into the pipeline.
+        let access = self.access_log.then(|| access_log::Entry {
+            span: span.clone(),
+            method: request.method.clone(),
+            path: format!("/{}", request.path_parts.join("/")),
+            started,
+        });
+
+        let pipeline = self
+            .clone()
+            .handle_request_inner(
+                request,
+                body_stream,
+                alias_prefix,
+                #[cfg(feature = "websocket")]
+                ws_upgrade,
+            )
+            .instrument(span.clone());
+        let response = match self.request_timeout {
+            None => pipeline.await?,
+            Some(d) => match tokio::time::timeout(d, pipeline).await {
+                Ok(response) => response?,
                 Err(_) => {
-                    warn!(timeout = ?d, "request exceeded configured timeout");
-                    Ok(self.finalizer.build_error(WebError::Timeout).await)
+                    span.in_scope(|| warn!(timeout = ?d, "request exceeded configured timeout"));
+                    self.finalizer.build_error(WebError::Timeout).await
                 }
             },
-        }
+        };
+        Ok(match access {
+            Some(entry) => {
+                let status = response.status();
+                response.map(|body| entry.attach(status, body))
+            }
+            None => response,
+        })
     }
 
-    /// The actual request pipeline. Split from
-    /// [`handle_request`](Self::handle_request) so the latter can wrap it
-    /// in a timeout when one is configured.
+    /// The request pipeline from step 3 on. [`handle_request`](Self::handle_request)
+    /// takes the request in (steps 1–2) and runs this inside the request's span
+    /// and under the per-request timeout.
     ///
     /// **Lifecycle order:**
     ///
     /// 1. capture WS upgrade (if request looks like a handshake)
     /// 2. build the `Request` skeleton (no body yet) — and, when the router
-    ///    has host aliases, route an aliased request as the path it names
+    ///    has host aliases, route an aliased request as the path it names;
+    ///    then make the request's span from it
     /// 3. CORS preflight short-circuit (uses headers only)
     /// 4. match controller — 404 short-circuits *without* buffering the
     ///    body (efficiency win on adversarial bad-path requests); then stamp
@@ -917,181 +1021,119 @@ impl Server {
     /// to a single cap before knowing where the request is headed.
     async fn handle_request_inner(
         self: Arc<Self>,
-        #[allow(unused_mut)] mut req: HyperRequest<Incoming>,
+        mut request: Request,
+        body_stream: Incoming,
+        alias_prefix: Option<String>,
+        #[cfg(feature = "websocket")] ws_upgrade: Option<(hyper::upgrade::OnUpgrade, HeaderValue)>,
     ) -> Result<HyperResponse<ResponseBody>, hyper::Error> {
-        let request_span = (self.request_span)();
-        let handling = async move {
-            // 1. Capture the WS upgrade handshake (if any) before
-            //    `from_hyper_parts` consumes the request: the `OnUpgrade`
-            //    future and the derived `Sec-WebSocket-Accept`. (See
-            //    `websocket` module docs for why this happens up front.)
-            #[cfg(feature = "websocket")]
-            let ws_upgrade: Option<(hyper::upgrade::OnUpgrade, HeaderValue)> =
-                if websocket::is_upgrade_request(req.method(), req.headers()) {
-                    websocket::accept_key(req.headers())
-                        .map(|accept| (hyper::upgrade::on(&mut req), accept))
-                } else {
-                    None
-                };
+        // 3. CORS preflight: synthesize the 204 ourselves before any
+        //    application-layer work. Preflights are HTTP-protocol
+        //    traffic; neither `before` nor `after` middleware runs on
+        //    them (see `CLAUDE.md` principle 1).
+        if let Some(cors) = &self.cors
+            && CorsLayer::is_preflight(&request.method, &request.headers)
+        {
+            let mut resp = self.finalizer.build_response(ReplyData::Empty).await;
+            cors.apply(&request.headers, resp.headers_mut(), true);
+            return Ok(resp);
+        }
 
-            // 2. Build the skeleton (method / path / query / headers); the
-            //    body stream is held aside for step 5.
-            //
-            //    A host alias is applied here, before anything else sees the
-            //    request: from now on, for the router, every middleware and
-            //    the handler, it *is* the request for the aliased path. With
-            //    no aliases registered this is the only host work there is —
-            //    one check; `Host` is not even read. The host is read before
-            //    the skeleton takes the request, because an absolute-form
-            //    request's authority is in the URI, which the skeleton does
-            //    not keep.
-            let (mut request, body_stream, alias_prefix) = if self.router.has_host_aliases() {
-                let hit = self.router.host_alias_hit(req.uri(), req.headers());
-                let (mut request, body_stream) = Request::from_hyper_parts(req);
-                let alias_prefix = hit.and_then(|hit| hit.apply(&mut request.path_parts));
-                (request, body_stream, alias_prefix)
-            } else {
-                let (request, body_stream) = Request::from_hyper_parts(req);
-                (request, body_stream, None)
-            };
-
-            // 3. CORS preflight: synthesize the 204 ourselves before any
-            //    application-layer work. Preflights are HTTP-protocol
-            //    traffic; neither `before` nor `after` middleware runs on
-            //    them (see `CLAUDE.md` principle 1).
-            if let Some(cors) = &self.cors
-                && CorsLayer::is_preflight(&request.method, &request.headers)
-            {
-                let mut resp = self.finalizer.build_response(ReplyData::Empty).await;
-                cors.apply(&request.headers, resp.headers_mut(), true);
-                return Ok(resp);
-            }
-
-            // 4. Match controller. A path that hits nothing is 404 *before*
-            //    body buffering — a 10 MiB POST to a non-existent URL no
-            //    longer wastes 10 MiB of memory.
-            let route_match = match self.router.match_controller(&request.path_parts) {
-                Some(rm) => rm,
-                None => {
-                    return Ok(self
-                        .finalize_error(
-                            WebError::NotFound,
-                            &request,
-                            #[cfg(feature = "websocket")]
-                            ws_upgrade,
-                        )
-                        .await);
-                }
-            };
-
-            // 4b. Stamp the matched controller's rate-limit class onto the
-            //     request (the skeleton predates routing, so it was `None`).
-            //     This is the one piece of routing context a `before`
-            //     middleware can't otherwise see — it gets `&mut Request`,
-            //     not the matched controller. An application rate-limit
-            //     middleware reads `request.rate_limit_class` and applies its
-            //     own per-class policy; the framework owns the label and the
-            //     `429` response, not the limiter. (Set before the body
-            //     buffer so it survives `collect_body` and is present for the
-            //     whole pipeline, including the after-chain on error replies.)
-            request.rate_limit_class = route_match.controller.actus_rate_limit();
-
-            // 4c. Decide from the body's codings how to buffer it — as sent,
-            //     decoded from gzip, or not at all (`415` / `501`, see
-            //     `body_coding`) — before reading it, so a refused body never
-            //     touches the body cap or the inflight budget.
-            let coding = match self.body_coding(&request.headers, &body_stream) {
-                Ok(coding) => coding,
-                Err(refusal) => {
-                    return Ok(self
-                        .finalize_reply(
-                            refusal,
-                            &request,
-                            #[cfg(feature = "websocket")]
-                            ws_upgrade,
-                        )
-                        .await);
-                }
-            };
-
-            // 5. Resolve the effective body cap: the matched controller's
-            //    `#[controller(max_body_bytes = …)]` if it set one, otherwise
-            //    the server-wide `with_max_body_bytes` cap (default 2 MiB). A
-            //    future Phase 2 adds per-route overrides at the top of this
-            //    fall-through.
-            //
-            //    The error path returns the same skeleton so the after-chain
-            //    still has a `Request`.
-            //
-            //    A gzip body is decoded as it is buffered, the cap holding its
-            //    decoded size as well as its coded one.
-            let effective_cap = route_match
-                .controller
-                .actus_max_body_bytes()
-                .unwrap_or(self.max_body_bytes);
-            let budget = self.max_inflight_body_bytes.as_ref();
-            let collected = match coding {
-                BodyCoding::AsSent => {
-                    request
-                        .collect_body(body_stream, effective_cap, budget)
-                        .await
-                }
-                #[cfg(feature = "compression")]
-                BodyCoding::Gzip => {
-                    request
-                        .collect_gzip_body(body_stream, effective_cap, budget)
-                        .await
-                }
-            };
-            request = match collected {
-                Ok(r) => r,
-                Err((request, e)) => {
-                    warn!("rejecting request before parse: {}", e);
-                    return Ok(self
-                        .finalize_error(
-                            e,
-                            &request,
-                            #[cfg(feature = "websocket")]
-                            ws_upgrade,
-                        )
-                        .await);
-                }
-            };
-
-            // 6. Middleware `before` chain.
-            let pre_data: Option<ReplyData> =
-                match self.middleware_chain.process_request(&mut request).await {
-                    Ok(Outcome::Continue) => None,
-                    Ok(Outcome::Respond(data)) => Some(data),
-                    Err(e) => {
-                        return Ok(self
-                            .finalize_error(
-                                e,
-                                &request,
-                                #[cfg(feature = "websocket")]
-                                ws_upgrade,
-                            )
-                            .await);
-                    }
-                };
-
-            // A `before` hook short-circuited with a reply — skip routing
-            // and the handler, but still run the after-chain.
-            if let Some(data) = pre_data {
+        // 4. Match controller. A path that hits nothing is 404 *before*
+        //    body buffering — a 10 MiB POST to a non-existent URL no
+        //    longer wastes 10 MiB of memory.
+        let route_match = match self.router.match_controller(&request.path_parts) {
+            Some(rm) => rm,
+            None => {
                 return Ok(self
-                    .finalize_reply(
-                        data,
+                    .finalize_error(
+                        WebError::NotFound,
                         &request,
                         #[cfg(feature = "websocket")]
                         ws_upgrade,
                     )
                     .await);
             }
+        };
 
-            // 7. Body parse (JSON / form / opaque, per Content-Type).
-            //    Malformed body → 400 through the after-chain.
-            let mut params = match request.to_params() {
-                Ok(p) => p,
+        // 4b. Stamp the matched controller's rate-limit class onto the
+        //     request (the skeleton predates routing, so it was `None`).
+        //     This is the one piece of routing context a `before`
+        //     middleware can't otherwise see — it gets `&mut Request`,
+        //     not the matched controller. An application rate-limit
+        //     middleware reads `request.rate_limit_class` and applies its
+        //     own per-class policy; the framework owns the label and the
+        //     `429` response, not the limiter. (Set before the body
+        //     buffer so it survives `collect_body` and is present for the
+        //     whole pipeline, including the after-chain on error replies.)
+        request.rate_limit_class = route_match.controller.actus_rate_limit();
+
+        // 4c. Decide from the body's codings how to buffer it — as sent,
+        //     decoded from gzip, or not at all (`415` / `501`, see
+        //     `body_coding`) — before reading it, so a refused body never
+        //     touches the body cap or the inflight budget.
+        let coding = match self.body_coding(&request.headers, &body_stream) {
+            Ok(coding) => coding,
+            Err(refusal) => {
+                return Ok(self
+                    .finalize_reply(
+                        refusal,
+                        &request,
+                        #[cfg(feature = "websocket")]
+                        ws_upgrade,
+                    )
+                    .await);
+            }
+        };
+
+        // 5. Resolve the effective body cap: the matched controller's
+        //    `#[controller(max_body_bytes = …)]` if it set one, otherwise
+        //    the server-wide `with_max_body_bytes` cap (default 2 MiB). A
+        //    future Phase 2 adds per-route overrides at the top of this
+        //    fall-through.
+        //
+        //    The error path returns the same skeleton so the after-chain
+        //    still has a `Request`.
+        //
+        //    A gzip body is decoded as it is buffered, the cap holding its
+        //    decoded size as well as its coded one.
+        let effective_cap = route_match
+            .controller
+            .actus_max_body_bytes()
+            .unwrap_or(self.max_body_bytes);
+        let budget = self.max_inflight_body_bytes.as_ref();
+        let collected = match coding {
+            BodyCoding::AsSent => {
+                request
+                    .collect_body(body_stream, effective_cap, budget)
+                    .await
+            }
+            #[cfg(feature = "compression")]
+            BodyCoding::Gzip => {
+                request
+                    .collect_gzip_body(body_stream, effective_cap, budget)
+                    .await
+            }
+        };
+        request = match collected {
+            Ok(r) => r,
+            Err((request, e)) => {
+                warn!("rejecting request before parse: {}", e);
+                return Ok(self
+                    .finalize_error(
+                        e,
+                        &request,
+                        #[cfg(feature = "websocket")]
+                        ws_upgrade,
+                    )
+                    .await);
+            }
+        };
+
+        // 6. Middleware `before` chain.
+        let pre_data: Option<ReplyData> =
+            match self.middleware_chain.process_request(&mut request).await {
+                Ok(Outcome::Continue) => None,
+                Ok(Outcome::Respond(data)) => Some(data),
                 Err(e) => {
                     return Ok(self
                         .finalize_error(
@@ -1103,40 +1145,66 @@ impl Server {
                         .await);
                 }
             };
-            // The router's answer to "did an alias route this?", for the
-            // handler — so it never has to match `Host` a second time.
-            if let Some(prefix) = alias_prefix {
-                params.set_alias_prefix(prefix);
-            }
 
-            // 8. Dispatch via the matched controller. 405 (verb mismatch
-            //    inside the controller) and handler-returned errors both
-            //    come back through here.
-            match route_match
-                .controller
-                .actus_dispatch(&route_match.action, params)
-                .await
-            {
-                Ok(data) => Ok(self
-                    .finalize_reply(
-                        data,
-                        &request,
-                        #[cfg(feature = "websocket")]
-                        ws_upgrade,
-                    )
-                    .await),
-                Err(e) => Ok(self
+        // A `before` hook short-circuited with a reply — skip routing
+        // and the handler, but still run the after-chain.
+        if let Some(data) = pre_data {
+            return Ok(self
+                .finalize_reply(
+                    data,
+                    &request,
+                    #[cfg(feature = "websocket")]
+                    ws_upgrade,
+                )
+                .await);
+        }
+
+        // 7. Body parse (JSON / form / opaque, per Content-Type).
+        //    Malformed body → 400 through the after-chain.
+        let mut params = match request.to_params() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(self
                     .finalize_error(
                         e,
                         &request,
                         #[cfg(feature = "websocket")]
                         ws_upgrade,
                     )
-                    .await),
+                    .await);
             }
+        };
+        // The router's answer to "did an alias route this?", for the
+        // handler — so it never has to match `Host` a second time.
+        if let Some(prefix) = alias_prefix {
+            params.set_alias_prefix(prefix);
         }
-        .instrument(request_span);
-        REQUEST_STARTED.scope(Instant::now(), handling).await
+
+        // 8. Dispatch via the matched controller. 405 (verb mismatch
+        //    inside the controller) and handler-returned errors both
+        //    come back through here.
+        match route_match
+            .controller
+            .actus_dispatch(&route_match.action, params)
+            .await
+        {
+            Ok(data) => Ok(self
+                .finalize_reply(
+                    data,
+                    &request,
+                    #[cfg(feature = "websocket")]
+                    ws_upgrade,
+                )
+                .await),
+            Err(e) => Ok(self
+                .finalize_error(
+                    e,
+                    &request,
+                    #[cfg(feature = "websocket")]
+                    ws_upgrade,
+                )
+                .await),
+        }
     }
 }
 

@@ -12,25 +12,31 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ### Added
 
+- **`Server::with_access_log()`** writes an access log: one `tracing` event
+  for every response the server sends, when the response ends, at `INFO`
+  under the target `actus::access`, inside the request's span:
+  `method=GET path=/users/7 status=200 elapsed_ms=1.284`. Every response
+  means a `404` from the router, a refused body, a CORS preflight, a WebSocket
+  handshake's `101`, a request timeout's `504`, and the `500` an `after`
+  hook's error becomes, each with the status actually sent. A streamed
+  response is logged when its stream ends, its whole life as its time. The
+  server writes it after everything that can change a reply, so there is no
+  middleware to register in the right place.
 - **`Server::with_request_span(make)`** names the `tracing` span each request
-  runs in, made by `make` as the request arrives; the default is still
-  `span!(Level::INFO, "request")`. A field declared on it `Empty` and recorded
-  once the request learns its value — in a `prepare` hook, say — is printed
-  with every event the request emits, `RequestLogger`'s included.
-- **`ReplyData::status_code()`** — the status the finalizer sends for a reply,
-  for code that reports a reply rather than builds one.
+  runs in. `make` gets the `Request` as it arrived (method, path, query and
+  headers) before routing. A field set there from the request, such as a
+  correlation id, is on every line the request emits, a router `404`'s
+  included. A field declared `Empty` and recorded where the request learns
+  it, such as the caller a `prepare` hook resolved, rides on every line after
+  that. The default is still `span!(Level::INFO, "request")`.
+- **`ReplyData::status()`** — the status a reply stands to be sent with: the
+  reader to `set_status`, for an `after` hook that decides from it.
 
 ### Changed
 
-- **`RequestLogger` writes its event when the reply is ready**, from its
-  `after` hook rather than its `before` hook, and adds the reply's `status`
-  and `elapsed_ms`: `request method=GET path=/users/7 status=200
-  elapsed_ms=1.284`. The `after` chain runs on replies the `before` hook never
-  saw — a `404` from the router, a refused body — so those are now logged too.
-  A CORS preflight is not, as before, and nor is a completed WebSocket
-  handshake, which was logged at its start before. Add `RequestLogger` first,
-  so its `after` hook runs last and reports the reply as the other middleware
-  left it.
+- A request timeout's `504` is answered inside the request's span, so the
+  server's `request exceeded configured timeout` warning carries the span's
+  fields.
 
 ## [1.9.0]
 
