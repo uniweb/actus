@@ -95,6 +95,25 @@ impl PartialEq for ReplyData {
 pub type Reply = Result<ReplyData, WebError>;
 
 impl ReplyData {
+    /// The status the [`Finalizer`](crate::Finalizer) sends for this reply: `204` for
+    /// [`Empty`](Self::Empty); `200` for [`Json`](Self::Json), [`Bytes`](Self::Bytes) and
+    /// [`Stream`](Self::Stream); a [`Rich`](Self::Rich) reply's own status, else its payload's;
+    /// and `101` for an [`Upgrade`](Self::Upgrade), which the server answers with the
+    /// handshake.
+    ///
+    /// For code that reports a reply rather than builds one, such as an access log in a
+    /// middleware `after` hook, so it states the code the client receives.
+    pub fn status_code(&self) -> http::StatusCode {
+        match self {
+            ReplyData::Empty => http::StatusCode::NO_CONTENT,
+            ReplyData::Json(_) | ReplyData::Bytes { .. } | ReplyData::Stream(_) => {
+                http::StatusCode::OK
+            }
+            ReplyData::Rich(spec) => spec.status.unwrap_or_else(|| spec.payload.status_code()),
+            ReplyData::Upgrade(_) => http::StatusCode::SWITCHING_PROTOCOLS,
+        }
+    }
+
     /// Add a response header, replacing any header already on the reply
     /// whose name matches **case-insensitively** — HTTP field names are
     /// case-insensitive (RFC 9110 §5.1), so `add_header("cache-control", …)`

@@ -260,6 +260,46 @@ mod tests {
         assert_eq!(body["allowed_methods"], serde_json::json!(["GET", "POST"]));
     }
 
+    /// `ReplyData::status_code` names the status the finalizer sends, for every payload kind
+    /// a response is built from and for an error turned into a reply — so an access log that
+    /// reports `status_code()` reports what the client received.
+    #[tokio::test]
+    async fn status_code_is_the_status_the_finalizer_sends() {
+        let rich = |payload: ReplyData, status: Option<StatusCode>| {
+            ReplyData::Rich(Box::new(ReplySpec {
+                payload,
+                status,
+                headers: std::collections::HashMap::new(),
+            }))
+        };
+        let cases: Vec<(&str, ReplyData)> = vec![
+            ("empty", ReplyData::Empty),
+            ("json", ReplyData::Json(serde_json::json!({ "a": 1 }))),
+            ("bytes", crate::reply::bytes("text/plain", b"hi".to_vec())),
+            (
+                "stream",
+                crate::reply::stream(
+                    futures_util::stream::empty::<Result<Bytes, std::io::Error>>(),
+                ),
+            ),
+            (
+                "rich, its own status",
+                rich(ReplyData::Empty, Some(StatusCode::CREATED)),
+            ),
+            ("rich, its payload's", rich(ReplyData::Empty, None)),
+            (
+                "an error",
+                Finalizer::new().error_to_reply(WebError::NotFound),
+            ),
+        ];
+        let finalizer = Finalizer::new();
+        for (case, data) in cases {
+            let said = data.status_code();
+            let sent = finalizer.build_response(data).await.status();
+            assert_eq!(said, sent, "{case}");
+        }
+    }
+
     #[tokio::test]
     async fn other_errors_have_no_allow_header() {
         let res = Finalizer::new().build_error(WebError::NotFound).await;
