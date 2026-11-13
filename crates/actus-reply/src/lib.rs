@@ -1,5 +1,9 @@
 //! Response types and the `reply!` macro for the Actus framework.
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png"
+)]
 
 pub mod finalizer;
 pub mod reply;

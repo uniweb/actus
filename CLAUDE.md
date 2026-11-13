@@ -26,6 +26,8 @@ Five crates plus two examples:
 - `examples/basic/` — wires services + `app_routes!` + JSON body + header auth + verb restrictions + `{...path}` rest param + CORS + compression + gzip request bodies + WebSocket echo + SSE + OpenAPI + the access log + a maintenance-mode middleware, all served over real HTTP. Always keep this compiling.
 - `examples/advanced/` — the application-side patterns in working code: a domain-error → `WebError` mapping, `ProblemDetails` with `field`/`rule`, a class-based rate-limit `Middleware` with a startup coverage check (`--check`), per-controller `max_body_bytes`, **route families** (`#[controller(expects = …)]` floors, the `families { … }` block on `app_routes!`, `family_coverage` at boot, a declaration-keyed `FloorGate` middleware via `server.router()`), the caller on the access log (`request_span` + `lax_auth` recording on it + `with_access_log()`), and the daemon-guard integration tests (`tests/integration.rs`). Also keep compiling.
 
+Outside the crates, `assets/` holds the identity images: the banner and the mascot the README shows, and the icon every crate's `#![doc(html_logo_url, html_favicon_url)]` points at on docs.rs. They are referenced by absolute `raw.githubusercontent.com/uniweb/actus/main/assets/…` URLs, so the same README renders on GitHub and crates.io. Keep those paths stable: docs.rs pages of released versions point at them too. No crate packages them.
+
 ## Feature flags
 
 Default-off; opt in on the `actus` facade crate, which forwards to `actus-server`:

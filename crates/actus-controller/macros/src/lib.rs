@@ -12,6 +12,10 @@
 //! `rate_limit` / `max_body_bytes`, and per-route docs sourced from each handler's
 //! `///` comment.
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png"
+)]
 
 use proc_macro::TokenStream;
 use quote::{ToTokens, quote};

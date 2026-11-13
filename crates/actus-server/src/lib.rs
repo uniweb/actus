@@ -6,6 +6,10 @@
 //! the deepest controller-bearing prefix in the route tree, then hands the
 //! remaining path segment (the "action") to that controller's dispatcher.
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png"
+)]
 
 mod access_log;
 #[cfg(feature = "compression")]

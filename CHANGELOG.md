@@ -45,6 +45,11 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   where every other error gave it a status it could read. The after chain
   still does not run on it.
 
+### Documentation
+
+- Actus has a logo and a mascot. The README opens with the banner, every
+  crate's docs.rs pages carry the icon, and the images live in `assets/`.
+
 ## [1.9.0]
 
 ### Added

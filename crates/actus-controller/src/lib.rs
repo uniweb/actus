@@ -4,6 +4,10 @@
 //! [`routing`] helpers. This is what user code and the `#[controller]` /
 //! `routes!` / `app_routes!` macros' generated code interact with.
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png"
+)]
 
 pub use async_trait::async_trait;
 use bytes::Bytes;

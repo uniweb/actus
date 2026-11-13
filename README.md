@@ -1,4 +1,4 @@
-# Actus
+# ![Actus](https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-banner.jpg)
 
 [![crates.io](https://img.shields.io/crates/v/actus.svg)](https://crates.io/crates/actus)
 [![docs.rs](https://img.shields.io/docsrs/actus)](https://docs.rs/actus)
@@ -9,6 +9,8 @@
 Actus is a Rust web framework that gives you a clear two-tier structure for your application — a top-level routing blueprint and self-contained controllers — while letting you mix REST, RPC-style actions, and legacy URL migrations within the same codebase. It's built directly on [Hyper](https://hyper.rs/) and [Tokio](https://tokio.rs/); there's no separate server to run it on.
 
 ## Philosophy
+
+<img src="https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-mascot.jpg" alt="The Actus mascot: an orange ant in a cape and scarf, carrying a backpack with the Actus mark, looking out from a mountain rock" width="300" align="right">
 
 Most Rust web frameworks are either unopinionated (you invent structure) or rigidly opinionated (you bend to their paradigm). Actus picks a different middle:
 
@@ -1197,6 +1199,8 @@ The framework's contribution is the `rate_limit` class label + the 429 + `Retry-
 
 ```
 actus/
+├── assets/                       # the logo, icon and mascot this README and docs.rs use;
+│                                 #   in no crate's package
 ├── crates/
 │   ├── actus/                    # facade crate; re-exports the prelude
 │   ├── actus-reply/              # Reply, ReplyData, WebError, the reply! macro,

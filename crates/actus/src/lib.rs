@@ -388,6 +388,10 @@
 //! [`actus-controller`]: https://docs.rs/actus-controller
 //! [`actus-reply`]: https://docs.rs/actus-reply
 //! [repository]: https://github.com/uniweb/actus
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/uniweb/actus/main/assets/actus-icon.png"
+)]
 
 pub use actus_reply::Finalizer;
 
