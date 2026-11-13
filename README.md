@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/actus)](https://docs.rs/actus)
 [![CI](https://github.com/uniweb/actus/actions/workflows/ci.yml/badge.svg)](https://github.com/uniweb/actus/actions/workflows/ci.yml)
 
-> The pragmatic web framework for Rust. Auditable controllers, persistent services, real HTTP — out of the box.
+> **Explicit architecture for Rust web apps.** Every endpoint, the services it uses and who can call it are declared in two macros the compiler checks, so a teammate, an auditor or an AI agent can see the whole backend at a glance.
 
 Actus is a Rust web framework that gives you a clear two-tier structure for your application — a top-level routing blueprint and self-contained controllers — while letting you mix REST, RPC-style actions, and legacy URL migrations within the same codebase. It's built directly on [Hyper](https://hyper.rs/) and [Tokio](https://tokio.rs/); there's no separate server to run it on.
 
@@ -1199,8 +1199,8 @@ The framework's contribution is the `rate_limit` class label + the 429 + `Retry-
 
 ```
 actus/
-├── assets/                       # the logo, icon and mascot this README and docs.rs use;
-│                                 #   in no crate's package
+├── assets/                       # the logo, icon and mascot this README and docs.rs use, and the
+│                                 #   repository's social preview; in no crate's package
 ├── crates/
 │   ├── actus/                    # facade crate; re-exports the prelude
 │   ├── actus-reply/              # Reply, ReplyData, WebError, the reply! macro,
@@ -1282,7 +1282,7 @@ What's deliberately deferred is additive, not breaking: per-route body caps and 
 | Feature                | Actus                              | Axum / Actix-web         | Rocket            |
 | ---------------------- | ---------------------------------- | ------------------------ | ----------------- |
 | Route organization     | Hierarchical & centralized         | Distributed              | Attribute-based   |
-| Primary strength       | Auditability + ergonomics          | Ecosystem                | Ergonomics        |
+| Primary strength       | Auditability + explicit structure  | Ecosystem                | Ergonomics        |
 | Routing style          | REST + RPC + legacy, hybrid-first  | Primarily REST           | Primarily REST    |
 | Service / DI model     | Per-route struct-literal injection | Extensions / extractors  | State guards      |
 | Legacy URL migration   | First-class                        | Manual                   | Manual            |

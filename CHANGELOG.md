@@ -10,6 +10,16 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
+### Documentation
+
+- One tagline everywhere: the banner's **"Explicit architecture for Rust web
+  apps."**, with one sentence of what it means. Every endpoint, the services
+  it uses and who can call it are declared in two macros the compiler checks.
+  The crate description said "ergonomic" and the crate docs and the README
+  said "pragmatic"; all now say this.
+- `assets/actus-social-preview.jpg` (1280×640), the repository's social
+  preview.
+
 ## [1.10.0]
 
 ### Added

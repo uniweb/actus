@@ -1,8 +1,9 @@
 //! # Actus
 //!
-//! The pragmatic web framework for Rust: auditable controllers, persistent
-//! services, real HTTP — out of the box. Built directly on [hyper] and
-//! [tokio]; there is no separate server to run it on.
+//! Explicit architecture for Rust web apps: every endpoint, the services it
+//! uses and who can call it are declared in two macros the compiler checks.
+//! Built directly on [hyper] and [tokio]; there is no separate server to run
+//! it on.
 //!
 //! Actus gives you a clear two-tier structure — a top-level routing blueprint
 //! and self-contained controllers — while letting you mix REST, RPC-style

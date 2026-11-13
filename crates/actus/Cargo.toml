@@ -9,7 +9,7 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-description = "The ergonomic web framework for Rust."
+description = "The Rust web framework with an explicit, auditable architecture: every endpoint, the services it uses and who can call it, declared in two macros the compiler checks."
 documentation = "https://docs.rs/actus"
 readme = "../../README.md"
 
