@@ -22,7 +22,7 @@ The result is a framework where reviewers can answer "what endpoints exist, what
 
 A handful of principles shape how Actus is built.
 
-**Two kinds of cross-cutting concerns get two shapes.** CORS, body limits, compression — concerns the *server* does, with positions in the request lifecycle dictated by HTTP — are named `Server::with_X(...)` methods. Logging, auth gates, request IDs, maintenance mode, caching — concerns the *application* applies, in an order it owns — go through `Middleware`. The two are different, and the framework treats them differently; you don't pick the ordering of CORS in a stack.
+**Two kinds of cross-cutting concerns get two shapes.** CORS, body limits, compression, the access log — concerns the *server* does, with positions in the request lifecycle dictated by HTTP — are named `Server::with_X(...)` methods. Application logging, auth gates, request IDs, maintenance mode, caching — concerns the *application* applies, in an order it owns — go through `Middleware`. The two are different, and the framework treats them differently; you don't pick the ordering of CORS in a stack. The test is position, not topic: an access log is logging, but what it records (the status sent, when the response ended, on replies no hook sees) is the server's to know, so it is a server feature. A middleware that is only correct at one place in the chain is a server feature in disguise.
 
 **Auditability over uniformity.** A reviewer should be able to answer "what does this server do?" and "what endpoints exist?" by reading a small, well-known set of places — the `app_routes!` block, the `routes!` blocks, and the `Server::new(...)...` chain. When a named, discoverable API and a uniform one are in tension, we pick discoverable.
 
