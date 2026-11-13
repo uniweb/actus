@@ -323,7 +323,10 @@ impl Server {
     /// was awaiting (DB query, channel recv, etc.). The 504 reply is
     /// one-shot — the after-chain doesn't run on it (by definition,
     /// some component upstream was unresponsive; running more risks
-    /// hanging again).
+    /// hanging again). It does carry the CORS headers of
+    /// [`Server::with_cors`], as every other response does, so a browser
+    /// lets a cross-origin page read it; and the
+    /// [access log](Server::with_access_log) records it.
     pub fn with_request_timeout(mut self, d: Duration) -> Self {
         self.request_timeout = Some(d);
         self
@@ -963,6 +966,14 @@ impl Server {
             started,
         });
 
+        // A timeout's `504` is answered here, after the pipeline has dropped the
+        // request. CORS reads only its `Origin`, so keep that, when there is a
+        // timeout to answer and a CORS policy to answer it with.
+        let origin = match (&self.cors, self.request_timeout) {
+            (Some(_), Some(_)) => request.headers.get(http::header::ORIGIN).cloned(),
+            _ => None,
+        };
+
         let pipeline = self
             .clone()
             .handle_request_inner(
@@ -979,7 +990,15 @@ impl Server {
                 Ok(response) => response?,
                 Err(_) => {
                     span.in_scope(|| warn!(timeout = ?d, "request exceeded configured timeout"));
-                    self.finalizer.build_error(WebError::Timeout).await
+                    let mut response = self.finalizer.build_error(WebError::Timeout).await;
+                    // One-shot, so no after chain; but a cross-origin response all
+                    // the same, so the browser may read it like any other error.
+                    if let (Some(cors), Some(origin)) = (&self.cors, origin) {
+                        let mut request_headers = HeaderMap::new();
+                        request_headers.insert(http::header::ORIGIN, origin);
+                        cors.apply(&request_headers, response.headers_mut(), false);
+                    }
+                    response
                 }
             },
         };

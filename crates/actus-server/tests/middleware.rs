@@ -392,6 +392,45 @@ async fn request_timeout_yields_504_and_skips_the_after_chain() {
     let _ = stop.send(());
 }
 
+/// The timeout's `504` skips the after-chain, but it is still a cross-origin
+/// response: it carries the CORS headers (and the `Vary: Origin` a cache needs),
+/// so the browser lets the page read it, like every other error. It went out
+/// without them through 1.9.0. The control: a request with no `Origin` gets no
+/// `Access-Control-*`, exactly as on any other response.
+#[tokio::test]
+async fn request_timeout_504_carries_the_cors_headers() {
+    let (addr, stop) = spawn(|s| {
+        s.with_cors(CorsLayer::new().allow_origin("https://app.example.com"))
+            .with_request_timeout(Duration::from_millis(100))
+    })
+    .await;
+
+    let cross = "GET /svc/slow HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://app.example.com\r\nConnection: close\r\n\r\n";
+    let (status, headers, _body) = http(addr, cross).await;
+    assert_eq!(status, 504);
+    assert_eq!(
+        headers
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("https://app.example.com"),
+        "{headers:?}",
+    );
+    assert_eq!(
+        headers.get("vary").map(|v| v.to_str().unwrap()),
+        Some("Origin")
+    );
+
+    let same_origin = "GET /svc/slow HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let (status, headers, _body) = http(addr, same_origin).await;
+    assert_eq!(status, 504);
+    assert!(
+        headers.get("access-control-allow-origin").is_none(),
+        "{headers:?}"
+    );
+
+    let _ = stop.send(());
+}
+
 #[tokio::test]
 async fn controller_max_body_attribute_overrides_server_default() {
     // `Tight` has `#[controller(max_body_bytes = 16)]`; the server's

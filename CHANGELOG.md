@@ -38,6 +38,13 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   server's `request exceeded configured timeout` warning carries the span's
   fields.
 
+### Fixed
+
+- **A request timeout's `504` carries the CORS headers.** It was built
+  one-shot and sent without them, so a cross-origin page met a CORS failure
+  where every other error gave it a status it could read. The after chain
+  still does not run on it.
+
 ## [1.9.0]
 
 ### Added
