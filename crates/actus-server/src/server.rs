@@ -27,7 +27,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -35,6 +35,23 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, Level, error, info, span, warn};
 
 type ResponseBody = BoxBody<Bytes, WebError>;
+
+tokio::task_local! {
+    /// When the request being served arrived — set around each request's handling, so
+    /// anything that runs inside it (the middleware hooks, the handler) can tell how long it
+    /// has taken.
+    static REQUEST_STARTED: Instant;
+}
+
+/// How long the request being served has been in hand, or `None` outside a request.
+pub(crate) fn request_elapsed() -> Option<Duration> {
+    REQUEST_STARTED.try_with(|started| started.elapsed()).ok()
+}
+
+/// The span a request runs in when the application names none ([`Server::with_request_span`]).
+fn default_request_span() -> tracing::Span {
+    span!(Level::INFO, "request")
+}
 
 /// One kibibyte (1024 bytes). For readable byte-size limits, e.g.
 /// `#[controller(max_body_bytes = 4 * KIB)]`.
@@ -96,6 +113,8 @@ pub struct Server {
     /// ([`Server::with_gzip_request_bodies`]). `false` by default.
     #[cfg(feature = "compression")]
     gzip_request_bodies: bool,
+    /// Makes the span each request runs in ([`Server::with_request_span`]).
+    request_span: fn() -> tracing::Span,
 }
 
 impl Server {
@@ -119,6 +138,7 @@ impl Server {
             sent_bytes: None,
             #[cfg(feature = "compression")]
             gzip_request_bodies: false,
+            request_span: default_request_span,
         }
     }
 
@@ -146,6 +166,31 @@ impl Server {
     /// already hold the aliased path by the time any middleware runs.
     pub fn router(&self) -> Arc<Router> {
         Arc::clone(&self.router)
+    }
+
+    /// Names the span each request runs in, made by `make` as the request arrives. The
+    /// default is `span!(Level::INFO, "request")`.
+    ///
+    /// Every `tracing` event emitted while the request is served — by middleware, by the
+    /// handler, by [`RequestLogger`](crate::middleware::RequestLogger) — runs inside this
+    /// span, so a field declared on it and recorded as the request learns its value rides on
+    /// each of them. Declare such a field `Empty` and record it where it becomes known:
+    ///
+    /// ```ignore
+    /// fn request_span() -> tracing::Span {
+    ///     tracing::info_span!("request", user = tracing::field::Empty)
+    /// }
+    ///
+    /// let server = Server::new(router).with_request_span(request_span);
+    ///
+    /// // later, in a `prepare` hook, once the caller is known:
+    /// tracing::Span::current().record("user", tracing::field::display(&user_id));
+    /// ```
+    ///
+    /// A field that is never recorded is left out of the output.
+    pub fn with_request_span(mut self, make: fn() -> tracing::Span) -> Self {
+        self.request_span = make;
+        self
     }
 
     /// Adds a middleware to the server's request processing chain.
@@ -874,8 +919,8 @@ impl Server {
         self: Arc<Self>,
         #[allow(unused_mut)] mut req: HyperRequest<Incoming>,
     ) -> Result<HyperResponse<ResponseBody>, hyper::Error> {
-        let request_span = span!(Level::INFO, "request");
-        async move {
+        let request_span = (self.request_span)();
+        let handling = async move {
             // 1. Capture the WS upgrade handshake (if any) before
             //    `from_hyper_parts` consumes the request: the `OnUpgrade`
             //    future and the derived `Sec-WebSocket-Accept`. (See
@@ -1090,8 +1135,8 @@ impl Server {
                     .await),
             }
         }
-        .instrument(request_span)
-        .await
+        .instrument(request_span);
+        REQUEST_STARTED.scope(Instant::now(), handling).await
     }
 }
 

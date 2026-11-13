@@ -64,6 +64,8 @@ openapi = []
 # path-only dev-dep from the published manifest; locally it still resolves via
 # the workspace path, so `tests/websocket.rs` is unaffected.
 actus = { path = "../actus", features = ["websocket"] }
+# `tests/request_logger.rs` reads what `RequestLogger` writes, through a subscriber of its own.
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true

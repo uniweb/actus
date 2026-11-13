@@ -10,6 +10,28 @@ See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
 
 ## [Unreleased]
 
+### Added
+
+- **`Server::with_request_span(make)`** names the `tracing` span each request
+  runs in, made by `make` as the request arrives; the default is still
+  `span!(Level::INFO, "request")`. A field declared on it `Empty` and recorded
+  once the request learns its value — in a `prepare` hook, say — is printed
+  with every event the request emits, `RequestLogger`'s included.
+- **`ReplyData::status_code()`** — the status the finalizer sends for a reply,
+  for code that reports a reply rather than builds one.
+
+### Changed
+
+- **`RequestLogger` writes its event when the reply is ready**, from its
+  `after` hook rather than its `before` hook, and adds the reply's `status`
+  and `elapsed_ms`: `request method=GET path=/users/7 status=200
+  elapsed_ms=1.284`. The `after` chain runs on replies the `before` hook never
+  saw — a `404` from the router, a refused body — so those are now logged too.
+  A CORS preflight is not, as before, and nor is a completed WebSocket
+  handshake, which was logged at its start before. Add `RequestLogger` first,
+  so its `after` hook runs last and reports the reply as the other middleware
+  left it.
+
 ## [1.9.0]
 
 ### Added
