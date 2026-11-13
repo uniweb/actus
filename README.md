@@ -57,7 +57,7 @@ use std::sync::Arc;
 use actus::prelude::*;
 use serde_json::{json, Value as JsonValue};
 
-// 1. A persistent service.
+// 1. Persistent services.
 #[derive(Clone)]
 struct Database { /* ... */ }
 
@@ -65,8 +65,18 @@ impl Database {
     async fn connect() -> Result<Self, std::io::Error> { Ok(Self { /* ... */ }) }
 }
 
-// 2. A controller that owns a URL prefix.
-struct UserController { db: Database }
+#[derive(Clone)]
+struct AuthService { /* ... */ }
+
+impl AuthService {
+    fn new() -> Self { Self { /* ... */ } }
+    fn resolve(&self, token: &str) -> Option<User> { /* ... */ }
+}
+
+struct User { is_admin: bool }
+
+// 2. A controller that owns a URL prefix. Its struct names the services it uses.
+struct UserController { db: Database, auth: AuthService }
 
 #[controller(prepare = Self::check_auth)]
 impl UserController {
@@ -110,10 +120,11 @@ impl UserController {
 // 3. The application's URL blueprint.
 app_routes! {
     deps {
-        db = Database::connect().await?,
+        db   = Database::connect().await?,
+        auth = AuthService::new(),
     }
     routes {
-        "api/users" => UserController { db },
+        "api/users" => UserController { db, auth },
     }
 }
 
@@ -1171,7 +1182,7 @@ End users typically depend on just `actus` and import `actus::prelude::*`.
 
 ## Status
 
-Actus is **1.0** — production-shaped knobs (per-request timeout, configurable drain deadline, three DoS guards, per-controller body cap, header-read timeout), correctness refinements landed across the lifecycle (the after-chain on *every* reply with a body and a request, q-value-aware `Accept-Encoding`, `Cache-Control: no-transform` respect, request-skeleton-on-error so error responses still flow through middleware and CORS), and the lifecycle reorder that puts route matching before body buffering. 117 tests pin the behavior across the workspace; `scripts/stress/` provides reproducible HTTP load, drain, and WebSocket-fanout runbooks for sanity-checking under sustained load.
+Actus is **1.0** — production-shaped knobs (per-request timeout, configurable drain deadline, three DoS guards, per-controller body cap, header-read timeout), correctness refinements landed across the lifecycle (the after-chain on *every* reply with a body and a request, q-value-aware `Accept-Encoding`, `Cache-Control: no-transform` respect, request-skeleton-on-error so error responses still flow through middleware and CORS), and the lifecycle reorder that puts route matching before body buffering. Tests across the workspace pin the behavior — run them as [the full check](CONTRIBUTING.md#the-full-check) does, in both feature configurations; `scripts/stress/` provides reproducible HTTP load, drain, and WebSocket-fanout runbooks for sanity-checking under sustained load.
 
 The API is **stable**: the public names and shapes are committed to, and breaking changes now go through a `2.0`. It's exercised heavily by a substantial production backend, and every public item is documented. See [Stability](#stability).
 

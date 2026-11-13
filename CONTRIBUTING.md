@@ -7,10 +7,10 @@ submit changes.
 
 Actus is **deliberately not shaped like other Rust web frameworks** — that is
 the point of the project, not an accident. Before proposing a design change,
-read the [Principles section of the README](README.md#principles). The question
-that gates a change is never "how does axum / Rocket / Express do this?" — it is
-"which of these principles does the change serve, and does its shape honor the
-others?"
+read the [Design principles section of the README](README.md#design-principles).
+The question that gates a change is never "how does axum / Rocket / Express do
+this?" — it is "which of these principles does the change serve, and does its
+shape honor the others?"
 
 In short:
 
@@ -66,9 +66,13 @@ The `examples/basic` and `examples/advanced` crates must always compile and run.
 - **Unit tests** live alongside the code (`#[cfg(test)] mod tests` at the bottom
   of the file). Match the style of the existing tests in that file.
 - **Integration tests** live in `crates/actus-server/tests/`. Bind
-  `127.0.0.1:0`, take the freed port, then `run_with_shutdown_on(addr, ...)`;
-  poll `TcpStream::connect` until it succeeds before sending the request. See
-  `tests/websocket.rs` and `tests/middleware.rs` for the shape.
+  `127.0.0.1:0` with `tokio::net::TcpListener`, read `local_addr()`, and hand
+  the listener itself to `Server::run_with_shutdown_listener(listener, ...)`.
+  It is already listening, so there is nothing to poll for. **Never bind, drop
+  and re-bind** with `run_with_shutdown_on`: tests in one binary run in
+  parallel, and on CI (2026-08-31) another test took the freed port in that
+  gap, so the request reached a stranger's server. See `tests/middleware.rs`
+  for the shape.
 - For HTTP requests in tests, prefer raw `tokio::net::TcpStream` + HTTP/1.1 with
   `Connection: close` and a small response parser — this keeps test
   dependencies at zero.

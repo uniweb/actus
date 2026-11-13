@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Versions before `1.0` may make breaking changes in a minor release; every such
 change is called out explicitly so a `cargo update` is never a silent surprise.
-See the [Roadmap to 1.0](README.md#roadmap-to-10) for the stability plan.
+See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
