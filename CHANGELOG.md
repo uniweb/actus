@@ -10,6 +10,8 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
+## [1.10.0]
+
 ### Added
 
 - **`Server::with_access_log()`** writes an access log: one `tracing` event
@@ -390,7 +392,8 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/uniweb/actus/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/uniweb/actus/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/uniweb/actus/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/uniweb/actus/compare/v1.6.0...v1.7.0
