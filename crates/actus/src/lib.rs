@@ -121,6 +121,7 @@
 //!   `prepare` hook, and per-controller `max_body_bytes` / `rate_limit`).
 //! - **Longest-prefix routing** at arbitrary depth, with a trailing
 //!   `{...rest}` catch-all and distinct `404` vs `405` (carrying `Allow`).
+//!   A `HEAD` is answered wherever a `GET` is, as that `GET` without its body.
 //! - **Typed extraction & state** — query as a multimap, form-urlencoded
 //!   bodies, and typed path/query/body params; `prepare` hooks stash typed
 //!   values via `params.insert::<T>(...)` that handlers read back.

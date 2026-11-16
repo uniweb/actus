@@ -234,10 +234,11 @@ async fn an_aliased_host_is_the_aliased_mount_through_its_own_routes() {
         created,
         json!({ "at": "tenants", "tenant": "acme", "created": { "sku": "x1" } })
     );
-    // …and the controller's verb rules: DELETE is not a route, so 405 + Allow.
+    // …and the controller's verb rules: DELETE is not a route, so 405 + Allow
+    // (with the `HEAD` that comes with `GET`).
     let raw = format!("DELETE /orders/7 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     let (status, allow, _) = http(addr, &raw).await;
-    assert_eq!((status, allow.as_deref()), (405, Some("GET")));
+    assert_eq!((status, allow.as_deref()), (405, Some("GET, HEAD")));
 
     let _ = stop.send(());
 }

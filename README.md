@@ -462,6 +462,7 @@ Requires the `openapi` feature — `actus = { version = "…", features = ["open
 | Route pattern | OpenAPI path with the mount prefix; `{name}` passes through; `{...name}` is stripped to `{name}` plus `x-actus-rest-param: true` on the parameter |
 | `verb == DEFAULT_VERBS` (`[GET, POST]`) | Two operations on the path, one per verb |
 | Single-verb route | One operation |
+| The `HEAD` that comes with a `GET` ([HTTP verb constraints](#http-verb-constraints)) | Nothing: only declared verbs become operations. A declared `HEAD` route is one |
 | Path param | `parameters[in: path, required: true]` |
 | Query param | `parameters[in: query, required: <no default>]`; `Vec<String>` is always optional |
 | `JsonValue` body | `requestBody` with `application/json` / `{}` schema |
@@ -514,6 +515,8 @@ The exceptions:
 - **Pre-parse failures** — a request hyper itself can't parse never reaches the `Request` skeleton, so there's nothing to hand the hook.
 
 `after` takes `&Request` so a hook can decide based on the request (echo a header, log with method/path, etc.), and `response.status()` gives the status the reply stands to be sent with. To shape the response from `after`, use `response.add_header(name, value)` and `response.set_status(code)` — both lift the `ReplyData` into `Rich` if needed, so the variant the handler returned doesn't matter. Header names are case-insensitive: `add_header` replaces a header of the same name in any letter case, and `response.header(name)` reads one back the same way — so a hook that sets a *default* checks `header(name).is_none()` first and leaves the handler's own choice standing. [`docs/guides/cache-control.md`](docs/guides/cache-control.md) works that pattern through for `Cache-Control`.
+
+**A `HEAD` reaches its `GET`'s route** ([HTTP verb constraints](#http-verb-constraints)), so middleware sees `request.method == HEAD` on a request the handler serves as a `GET`. A gate that keys on the method must treat the two alike, or a `HEAD` gets through where its `GET` is stopped. A gate keyed on the matched controller's declaration, like the `FloorGate` in [Route families](#route-families), needs no such care.
 
 ## Access log
 
@@ -739,11 +742,11 @@ By default, controllers are **strict**: requests with query parameters that no r
 
 ## HTTP verb constraints
 
-Verbs are *constraints*, not identities. A route declared without a verb prefix accepts both `GET` and `POST` — the two methods HTML forms emit natively, and the natural baseline for "this endpoint doesn't need extra protocol restrictions." Prefixing a route with a verb tightens the constraint to that single verb.
+Verbs are *constraints*, not identities. A route declared without a verb prefix accepts both `GET` and `POST` — the two methods HTML forms emit natively, and the natural baseline for "this endpoint doesn't need extra protocol restrictions." Prefixing a route with a verb tightens the constraint to that single verb. (Wherever `GET` is accepted, `HEAD` comes with it: see below.)
 
 ```rust
 routes! {
-    GET "posts"    => list_posts(),         // GET only
+    GET "posts"    => list_posts(),         // GET (HEAD comes with it)
     POST "posts"   => create_post(),        // POST only
     DELETE "{id}"  => delete_post(id: u64), // DELETE only
     "search"       => search(q: String),    // GET or POST
@@ -751,9 +754,11 @@ routes! {
 }
 ```
 
-`PUT`, `DELETE`, `PATCH` (semantic REST verbs) and `HEAD`, `OPTIONS` (protocol verbs) are deliberately not in the default set — they must be opted into explicitly. This prevents accidentally exposing destructive verbs on a route the author didn't think about.
+`PUT`, `DELETE`, `PATCH` (semantic REST verbs) and `OPTIONS` are deliberately not in the default set — they must be opted into explicitly. This prevents accidentally exposing destructive verbs on a route the author didn't think about.
 
-When a request's path matches a route pattern but the verb doesn't, Actus returns `405 Method Not Allowed` (not 404), with an `Allow` header listing the verbs that path *does* accept (and the same list as an `allowed_methods` member in the `application/problem+json` body).
+**`HEAD` comes with `GET`.** Every general-purpose server must support both (RFC 9110 §9.1), and a `HEAD` is a `GET` without the content (§9.3.2). So a route that accepts `GET`, declared `GET` or unmarked, also answers `HEAD`, as that `GET`: the same route, `prepare` hook, middleware and handler. The server sends the `GET`'s status and headers without its body. A buffered reply keeps the `Content-Length` the `GET` would send; a streamed one (an SSE route, say) is dropped unread, so a `HEAD` never holds a stream open. The handler cannot tell the two apart: `params.verb()` reports `GET`, the verb its route declares, while `Request::method` still says `HEAD` to middleware and the access log. No endpoint is added — it is the declared `GET`, minus the body — so the `routes!` block stays the whole list, and the OpenAPI document lists only the `GET`. To answer `HEAD` more cheaply than by running the `GET`, declare it: a `HEAD` route takes the `HEAD` requests its pattern matches, ahead of any `GET` route.
+
+When a request's path matches a route pattern but the verb doesn't, Actus returns `405 Method Not Allowed` (not 404), with an `Allow` header listing the verbs that path *does* accept, `HEAD` wherever `GET` is (and the same list as an `allowed_methods` member in the `application/problem+json` body).
 
 ## JSON body
 
@@ -1252,6 +1257,7 @@ What's there today:
 - **WebSocket** — `ws::upgrade(...)` from a route handler: the server does the handshake and runs your closure on the connection (behind the `websocket` feature).
 - **Header-based auth** via `Params::bearer_token()`.
 - **Distinct 404 / 405** based on whether path-only or path+verb didn't match; the `405` carries an `Allow` header.
+- **`HEAD` wherever `GET`** — a `HEAD` is answered as the `GET` it names, with its status and headers and without its body; a route that declares `HEAD` takes it itself. See [HTTP verb constraints](#http-verb-constraints).
 - **Structured error responses** via `WebError::Problem(ProblemDetails)` — RFC 7807 `application/problem+json` with arbitrary extension members.
 - **`429 Too Many Requests` plumbing** — `WebError::TooManyRequests(Option<Duration>)` sets the status and, when the hint is present, the `Retry-After` header + a `retry_after_seconds` extra in the problem body. The framework also surfaces a per-controller rate-limit **class** (`#[controller(rate_limit = "name")]` → `request.rate_limit_class`) so a limiter middleware can scope by controller. (The limiter itself is application policy; see the rate-limiting pattern.)
 - **Middleware** — `before` / `after` hooks via `Server::with_middleware(...)`; `before` can `Outcome::Continue`, `Outcome::Respond(reply)` (short-circuit), or `Err`. The `after` chain runs on *every* reply with a body and a request — successes, short-circuits, and every error path (404 / 405 / 400 / 401 / 413 / handler-returned `Err`). Ships `RequestLogger`, which logs each request as it is routed.

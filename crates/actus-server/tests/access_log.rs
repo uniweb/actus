@@ -249,6 +249,30 @@ async fn every_response_is_logged_once_inside_its_span() {
     assert_eq!(captured.access().len(), 2, "{:#?}", captured.lines());
 }
 
+/// A `HEAD` is logged as the `HEAD` it was, with the status sent, its `GET`'s, and after the
+/// `prepare` hook its `GET` runs. That includes a `HEAD` of a stream, whose body hyper drops
+/// unread.
+#[tokio::test]
+async fn a_head_is_logged_as_head_with_the_status_sent() {
+    let (captured, _guard) = capture();
+    let server = spawn(init().await.unwrap(), |s| {
+        s.with_request_span(span_from).with_access_log()
+    })
+    .await;
+    for path in ["/svc", "/svc/stream"] {
+        let raw = format!("HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        assert_eq!(send(server.addr, &raw).await.0, 200, "{path}");
+    }
+    server.stop().await;
+
+    for path in ["/svc", "/svc/stream"] {
+        let line = captured.access_for(path);
+        assert!(line.contains("method=HEAD"), "{line}");
+        assert!(line.contains("status=200"), "{line}");
+        assert!(line.contains("who=alice"), "{line}");
+    }
+}
+
 /// A request timeout's `504` skips the `after` chain; the access log has it anyway, inside the
 /// request's span — and so is the server's warning about it.
 #[tokio::test]

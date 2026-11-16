@@ -655,14 +655,10 @@ fn generate_controller_impl(
 
     let _ = mode_str;
 
-    // The prepare hook needs `&mut params` so it can stash per-request state
-    // for handlers via `params.insert(...)`. When no prepare is configured,
-    // omit `mut` to avoid an "unused_mut" warning in the user's crate.
-    let params_binding = if attrs.prepare.is_some() {
-        quote! { mut params: ::actus::__internal::Params }
-    } else {
-        quote! { params: ::actus::__internal::Params }
-    };
+    // `mut` on every controller: the dispatch sets the verb a `HEAD` routed as
+    // a `GET` is dispatched with (below), and a prepare hook takes `&mut
+    // params` so it can stash per-request state via `params.insert(...)`.
+    let params_binding = quote! { mut params: ::actus::__internal::Params };
 
     // `#[controller(max_body_bytes = …)]` — emit an `actus_max_body_bytes` override
     // returning `Some(<expr>)`. When not set, the trait's default impl
@@ -748,6 +744,16 @@ fn generate_controller_impl(
                     &params,
                     #mode_value
                 )?;
+
+                // `resolve` answers a `HEAD` that no route declares with the
+                // `GET` route it names. Dispatch it as that `GET`: the hook and
+                // the handler then see a verb their route declares, and behave
+                // exactly as they do for the `GET`.
+                if params.verb() == ::actus::__internal::Verb::HEAD
+                    && !matched_route.verb.contains(&::actus::__internal::Verb::HEAD)
+                {
+                    params.set_verb(::actus::__internal::Verb::GET);
+                }
 
                 // Call prepare function if configured
                 #prepare_call

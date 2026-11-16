@@ -313,10 +313,10 @@ async fn after_runs_on_router_404() {
 
 #[tokio::test]
 async fn after_runs_on_router_405_and_allow_header_survives() {
-    // `GET "" => hello()` is GET-only — a DELETE produces a 405 with the
-    // `Allow` header. The after-chain runs on the error reply and the
-    // X-Trace-Id stamp doesn't clobber `Allow` (the `Rich` headers map merges
-    // with the framework-emitted `Allow`).
+    // `GET "" => hello()` accepts GET (and the HEAD that comes with it) — a
+    // DELETE produces a 405 with the `Allow` header. The after-chain runs on
+    // the error reply and the X-Trace-Id stamp doesn't clobber `Allow` (the
+    // `Rich` headers map merges with the framework-emitted `Allow`).
     let (addr, stop) = spawn(|s| s.with_middleware(StampTraceId)).await;
     let req = "DELETE /svc HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nX-Trace-Id: trace-405\r\n\r\n";
     let (status, headers, _body) = http(addr, req).await;
@@ -324,7 +324,7 @@ async fn after_runs_on_router_405_and_allow_header_survives() {
     assert_eq!(status, 405);
     assert_eq!(
         headers.get("Allow").and_then(|v| v.to_str().ok()),
-        Some("GET"),
+        Some("GET, HEAD"),
         "the 405 should still carry the framework-emitted Allow header",
     );
     assert_eq!(

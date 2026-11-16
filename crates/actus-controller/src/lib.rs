@@ -68,8 +68,9 @@ impl core::fmt::Display for Verb {
 /// Verbs accepted by a route declared without a verb prefix. Reflects the
 /// "verbs are constraints, not identities" stance: an unmarked route imposes
 /// no semantic restriction beyond what HTML forms emit natively.
-/// Restrictive verbs (PUT/DELETE/PATCH) and protocol verbs (HEAD/OPTIONS)
-/// must be opted into explicitly.
+/// Restrictive verbs (PUT/DELETE/PATCH) and `OPTIONS` must be opted into
+/// explicitly. `HEAD` needs no place here: it comes with `GET`, on an unmarked
+/// route as on a `GET` one (see [`routing::resolve`]).
 pub const DEFAULT_VERBS: &[Verb] = &[Verb::GET, Verb::POST];
 
 // =========================
@@ -328,9 +329,26 @@ impl Params {
         self.insert(AliasPrefix(prefix.into()));
     }
 
-    /// The HTTP verb this request was dispatched with.
+    /// The HTTP verb this request was dispatched with: always one its route
+    /// declares.
+    ///
+    /// A `HEAD` that no route declares is dispatched as the `GET` it names
+    /// (see [`routing::resolve`]), so this reports `GET` for it, and the
+    /// `prepare` hook and the handler behave exactly as they do for the `GET`.
+    /// The server then sends the `GET`'s status and headers without the body.
+    /// The request's own method, which middleware and the access log see, is
+    /// still `HEAD`.
     pub fn verb(&self) -> Verb {
         self.verb
+    }
+
+    /// Set the verb this request is dispatched with, which [`Params::verb`]
+    /// reports from then on. The `#[controller]` dispatch calls this when
+    /// [`routing::resolve`] answers a `HEAD` with a `GET` route, so a handler
+    /// only ever sees a verb its route declares. Routing is over by then: this
+    /// changes what the hook and the handler read, not where the request goes.
+    pub fn set_verb(&mut self, verb: Verb) {
+        self.verb = verb;
     }
 
     /// Look up a request header (case-insensitive). Returns the *first*
@@ -769,11 +787,20 @@ pub mod routing {
     /// action (e.g. `"special"` and `"{id}"`), the one declared first wins —
     /// list the more specific route earlier.
     ///
+    /// **`HEAD` comes with `GET`.** Every general-purpose server supports both
+    /// (RFC 9110 §9.1), and a `HEAD` is a `GET` without the content (§9.3.2).
+    /// So a `HEAD` request goes to the first route that declares `HEAD`, and
+    /// when none matches it is resolved exactly as a `GET`, under the same
+    /// parameter rules, and the `GET` route is returned. The caller dispatches
+    /// it as that `GET`: the `#[controller]` dispatch sets [`Params::set_verb`]
+    /// to `GET`, and the server sends the `GET`'s status and headers without
+    /// the body. No other verb is implied.
+    ///
     /// When no route fully matches, the error distinguishes:
     /// - `WebError::MethodNotAllowed(methods)`: at least one route's *path*
     ///   pattern matched but its verb didn't; `methods` is the (sorted, deduped)
-    ///   set of verbs those routes accept, which the caller surfaces as the
-    ///   `Allow` header.
+    ///   set of verbs those routes accept, `HEAD` included wherever `GET` is,
+    ///   which the caller surfaces as the `Allow` header.
     /// - `WebError::NotFound`: no route's path pattern matched at all.
     #[inline]
     pub fn resolve<'a>(
@@ -781,6 +808,29 @@ pub mod routing {
         action: &str,
         params: &Params,
         mode: ControllerMode,
+    ) -> Result<(&'a RouteDef, ExtractedParams), WebError> {
+        match params.verb() {
+            // A route that declares `HEAD` takes it; failing that, it is the
+            // `GET` it names. (A `NotFound` means no pattern matched at all,
+            // which resolving as `GET` cannot change.)
+            Verb::HEAD => match resolve_as(routes, action, params, mode, Verb::HEAD) {
+                Err(WebError::MethodNotAllowed(_)) => {
+                    resolve_as(routes, action, params, mode, Verb::GET)
+                }
+                resolved => resolved,
+            },
+            verb => resolve_as(routes, action, params, mode, verb),
+        }
+    }
+
+    /// [`resolve`] for one verb: the first route whose pattern matches
+    /// `action` and whose verbs include `verb`.
+    fn resolve_as<'a>(
+        routes: &'a [RouteDef],
+        action: &str,
+        params: &Params,
+        mode: ControllerMode,
+        verb: Verb,
     ) -> Result<(&'a RouteDef, ExtractedParams), WebError> {
         // Verbs accepted by routes whose *path* matched but whose verb didn't.
         let mut allowed_methods: Vec<&'static str> = Vec::new();
@@ -794,13 +844,12 @@ pub mod routing {
 
             // Then verb check. `route.verb` is the (non-empty) set of verbs
             // this route accepts; an unmarked route carries `DEFAULT_VERBS`.
-            if !route.verb.contains(&params.verb()) {
-                for v in route.verb {
-                    let token = v.as_str();
-                    if !allowed_methods.contains(&token) {
-                        allowed_methods.push(token);
-                    }
-                }
+            if !route.verb.contains(&verb) {
+                // `HEAD` comes with `GET` (see `resolve`), so a `405`'s
+                // `Allow` names it wherever it names `GET`. Sorted and
+                // deduped below.
+                let implied_head = route.verb.contains(&Verb::GET).then_some(&Verb::HEAD);
+                allowed_methods.extend(route.verb.iter().chain(implied_head).map(Verb::as_str));
                 continue;
             }
 
@@ -1369,7 +1418,8 @@ mod resolve_tests {
     fn verb_mismatch_yields_405_with_sorted_deduped_allow_list() {
         // `""` matches the action `""` for both routes; the request verb
         // (PUT) matches neither, so we get 405 carrying the union of their
-        // verbs — sorted and deduped, so the `Allow` header is deterministic.
+        // verbs (with the `HEAD` that comes with `GET`), sorted and deduped so
+        // the `Allow` header is deterministic.
         static ROUTES: &[RouteDef] = &[
             RouteDef {
                 pattern: "",
@@ -1394,7 +1444,9 @@ mod resolve_tests {
             &params_with(Verb::PUT, HashMap::new()),
             ControllerMode::Strict,
         ) {
-            Err(WebError::MethodNotAllowed(methods)) => assert_eq!(methods, ["GET", "POST"]),
+            Err(WebError::MethodNotAllowed(methods)) => {
+                assert_eq!(methods, ["GET", "HEAD", "POST"])
+            }
             other => panic!("expected 405, got {other:?}"),
         }
         // GET matches the second route → Ok.
@@ -1427,6 +1479,159 @@ mod resolve_tests {
         ) {
             Err(WebError::NotFound) => {}
             other => panic!("expected 404, got {other:?}"),
+        }
+    }
+
+    /// A route without parameters, for the `HEAD` tests below.
+    const fn route(
+        pattern: &'static str,
+        handler: &'static str,
+        verb: &'static [Verb],
+    ) -> RouteDef {
+        RouteDef {
+            pattern,
+            handler_id: handler,
+            handler,
+            verb,
+            params: &[],
+            doc: None,
+        }
+    }
+
+    /// The handler `resolve` picks for `verb` on `action`.
+    fn handler_for(
+        routes: &'static [RouteDef],
+        action: &str,
+        verb: Verb,
+    ) -> Result<&'static str, WebError> {
+        resolve(
+            routes,
+            action,
+            &params_with(verb, HashMap::new()),
+            ControllerMode::Strict,
+        )
+        .map(|(route, _)| route.handler)
+    }
+
+    #[test]
+    fn head_is_resolved_as_the_get_it_names() {
+        static ROUTES: &[RouteDef] = &[
+            route("form", "form", DEFAULT_VERBS),
+            route("{id}", "get", &[Verb::GET]),
+        ];
+        assert_eq!(handler_for(ROUTES, "7", Verb::HEAD).unwrap(), "get");
+        // An unmarked route accepts `GET`, so it answers `HEAD` too.
+        assert_eq!(handler_for(ROUTES, "form", Verb::HEAD).unwrap(), "form");
+    }
+
+    #[test]
+    fn a_declared_head_route_takes_head_ahead_of_an_earlier_get() {
+        // The `HEAD` route is declared second on purpose: the `HEAD` implied by
+        // the first route must not shadow it.
+        static ROUTES: &[RouteDef] = &[
+            route("{id}", "get", &[Verb::GET]),
+            route("{id}", "head", &[Verb::HEAD]),
+        ];
+        assert_eq!(handler_for(ROUTES, "7", Verb::HEAD).unwrap(), "head");
+        assert_eq!(handler_for(ROUTES, "7", Verb::GET).unwrap(), "get");
+    }
+
+    #[test]
+    fn head_where_no_route_accepts_get_is_405_naming_what_does() {
+        static ROUTES: &[RouteDef] = &[route("", "create", &[Verb::POST])];
+        match handler_for(ROUTES, "", Verb::HEAD) {
+            Err(WebError::MethodNotAllowed(methods)) => assert_eq!(methods, ["POST"]),
+            other => panic!("expected 405, got {other:?}"),
+        }
+        // No pattern matches: a 404, as for any verb.
+        assert!(matches!(
+            handler_for(ROUTES, "other", Verb::HEAD),
+            Err(WebError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn allow_names_head_wherever_it_names_get() {
+        static ROUTES: &[RouteDef] = &[
+            route("", "list", &[Verb::GET]),
+            route("form", "form", DEFAULT_VERBS),
+        ];
+        match handler_for(ROUTES, "", Verb::DELETE) {
+            Err(WebError::MethodNotAllowed(methods)) => assert_eq!(methods, ["GET", "HEAD"]),
+            other => panic!("expected 405, got {other:?}"),
+        }
+        match handler_for(ROUTES, "form", Verb::PUT) {
+            Err(WebError::MethodNotAllowed(methods)) => {
+                assert_eq!(methods, ["GET", "HEAD", "POST"])
+            }
+            other => panic!("expected 405, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_other_verb_comes_with_get() {
+        static ROUTES: &[RouteDef] = &[route("", "list", &[Verb::GET])];
+        for verb in [
+            Verb::POST,
+            Verb::PUT,
+            Verb::DELETE,
+            Verb::PATCH,
+            Verb::OPTIONS,
+        ] {
+            assert!(
+                matches!(
+                    handler_for(ROUTES, "", verb),
+                    Err(WebError::MethodNotAllowed(_))
+                ),
+                "{verb} reached a GET route"
+            );
+        }
+    }
+
+    #[test]
+    fn head_meets_the_parameter_rules_of_its_get() {
+        // A required query parameter, in strict mode: a `HEAD` without it, or
+        // with an undeclared extra, gets the `400` the `GET` gets.
+        static ROUTES: &[RouteDef] = &[RouteDef {
+            pattern: "search",
+            handler_id: "search",
+            handler: "search",
+            verb: &[Verb::GET],
+            params: &[ParamDef {
+                name: "q",
+                ty: ParamType::String,
+                source: ParamSource::Query,
+                default: None,
+            }],
+            doc: None,
+        }];
+        let query = |pairs: &[(&str, &str)]| -> HashMap<String, Vec<String>> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), vec![v.to_string()]))
+                .collect()
+        };
+        for verb in [Verb::GET, Verb::HEAD] {
+            let resolved = |q| {
+                resolve(
+                    ROUTES,
+                    "search",
+                    &params_with(verb, q),
+                    ControllerMode::Strict,
+                )
+            };
+            assert!(
+                matches!(resolved(query(&[])), Err(WebError::BadRequest(_))),
+                "{verb}"
+            );
+            assert!(resolved(query(&[("q", "shoes")])).is_ok(), "{verb}");
+            assert!(
+                matches!(
+                    resolved(query(&[("q", "shoes"), ("x", "1")])),
+                    Err(WebError::BadRequest(_))
+                ),
+                "{verb}"
+            );
         }
     }
 

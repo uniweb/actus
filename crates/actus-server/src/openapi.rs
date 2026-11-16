@@ -479,6 +479,9 @@ mod tests {
         );
         // Every operation has a responses object.
         assert!(spec["paths"]["/api/users"]["get"]["responses"]["default"].is_object());
+        // The `HEAD` that comes with a `GET` is not a declared operation, so the
+        // spec does not list it.
+        assert!(spec["paths"]["/api/users"]["head"].is_null());
     }
 
     #[test]

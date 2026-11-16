@@ -93,3 +93,43 @@ async fn websocket_round_trip() {
     let _ = stop_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
 }
+
+/// A `HEAD` carrying a handshake's headers is no handshake: RFC 6455 §4.1 makes the method
+/// `GET`. It is handled as the `GET` it names, which is not a handshake either, so it gets the
+/// `426` that `GET` gets, without the body, and nothing is upgraded.
+#[tokio::test]
+async fn a_head_does_not_upgrade() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        Server::new(init().await.unwrap())
+            .run_with_shutdown_listener(listener, async move {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let raw = "HEAD /ws/echo HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade, close\r\n\
+               Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+               Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    stream.write_all(raw.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf))
+        .await
+        .expect("the server answers and closes the connection")
+        .unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    assert!(text.starts_with("HTTP/1.1 426 "), "{text}");
+    assert!(
+        text.ends_with("\r\n\r\n"),
+        "a HEAD reply carried a body: {text}"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}

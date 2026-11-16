@@ -10,6 +10,31 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
+### Changed
+
+- **`HEAD` is answered wherever `GET` is.** A `HEAD` to a route that
+  accepts `GET` got `405 Method Not Allowed`, with an `Allow` that did not
+  name `HEAD`, so uptime monitors and link checkers that send `HEAD` saw a
+  running service as down. RFC 9110 §9.1 requires every general-purpose
+  server to support it. Such a request is now handled as that `GET` (the
+  same route, `prepare` hook, middleware and handler) and answered with the
+  `GET`'s status and headers, without the body. A buffered reply keeps the
+  `Content-Length` the `GET` would send; a streamed one, an SSE stream
+  included, is dropped unread. `params.verb()` reports `GET` for it, so a
+  hook or a handler only ever sees a verb its route declares, while
+  `Request::method`, which middleware and the access log read, still says
+  `HEAD`. A route that declares `HEAD` takes it, ahead of a `GET` route for
+  the same path. A `405`'s `Allow` names `HEAD` wherever it names `GET`. The
+  OpenAPI document is unchanged: it lists declared operations.
+  **Behavior change:** such a request used to get a `405`, and now reaches
+  the `GET` handler.
+
+### Added
+
+- **`Params::set_verb`** sets the verb a request is dispatched with, which
+  `Params::verb` then reports. The `#[controller]` dispatch calls it for a
+  `HEAD` it routes as a `GET`.
+
 ## [1.10.1]
 
 ### Documentation
