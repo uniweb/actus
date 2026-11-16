@@ -35,9 +35,12 @@ actus-controller = { path = "crates/actus-controller", version = "1.10.1" }
 actus-controller-macros = { path = "crates/actus-controller/macros", version = "1.10.1" }
 actus-server = { path = "crates/actus-server", version = "1.10.1" }
 
-# Web & HTTP
-hyper = { version = "1.3", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
+# Web & HTTP. Only what the server uses: hyper's HTTP/1 server (the accept loop
+# serves every connection with `http1::Builder`) and hyper-util's tokio adapter
+# (`rt::TokioIo`). Not `full`, which also builds hyper's client, HTTP/2 and the
+# `h2` crate into every application on Actus, unused.
+hyper = { version = "1.3", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1.1"
 http-body-util = "0.1"
 bytes = "1.6"

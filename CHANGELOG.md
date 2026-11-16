@@ -28,6 +28,14 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   OpenAPI document is unchanged: it lists declared operations.
   **Behavior change:** such a request used to get a `405`, and now reaches
   the `GET` handler.
+- **Actus no longer builds hyper's client or HTTP/2 into your application.**
+  The workspace declared `hyper` and `hyper-util` with `features = ["full"]`,
+  so every application on Actus compiled hyper's client, its HTTP/2 support
+  and the `h2` crate, none of which Actus uses: it serves HTTP/1.1. It now
+  asks for hyper's `server` and `http1` and for hyper-util's `tokio`, and 19
+  crates leave its dependency tree, `h2` among them. An application that
+  uses hyper or hyper-util itself, but relied on Actus to turn on the
+  features it needs, must now name them in its own `Cargo.toml`.
 
 ### Added
 
