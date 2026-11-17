@@ -82,6 +82,22 @@ async fn a_server_with_the_timeout_serves_requests() {
     let _ = stop.send(());
 }
 
+/// A duration too long for the clock (`Duration::MAX`, for "never") is capped, not handed to
+/// hyper, which adds it to the clock unchecked: every connection panicked, and every client got
+/// a reset.
+#[tokio::test]
+async fn a_timeout_too_long_for_the_clock_still_serves_requests() {
+    let (addr, stop) = spawn(Duration::MAX).await;
+    let request = b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let (reply, _) = send_and_wait_for_close(addr, request).await;
+    assert!(
+        reply.starts_with(b"HTTP/1.1 204 "),
+        "{}",
+        String::from_utf8_lossy(&reply)
+    );
+    let _ = stop.send(());
+}
+
 /// A client that starts a request and stalls in its headers is disconnected without a reply
 /// once the timeout has passed, and not before.
 #[tokio::test]

@@ -19,6 +19,18 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   where `GET /export` got a `200`. Now a route that accepts `GET` answers a
   `HEAD` in declaration order, unless a route declares `HEAD` for the same
   pattern, which then takes it wherever it is declared.
+- **Actus requires hyper 1.6 and hyper-util 0.1.2**, where 1.11.0's
+  header-read timeout works. It allowed hyper 1.3 and hyper-util 0.1.0:
+  hyper-util before 0.1.2 has no `rt::TokioTimer`, so actus-server failed to
+  compile against it, and before hyper 1.6 the timeout neither closes an
+  idle keep-alive connection nor counts as a timeout, so it was logged as an
+  error.
+- **`Server::with_header_read_timeout` takes any duration.** hyper adds it
+  to the clock unchecked, so a very long one (`Duration::MAX`, for "never")
+  panicked every connection, and every client got a reset. A duration over
+  a year is now taken as a year.
+- **A header-read timeout during graceful shutdown is logged at `DEBUG`**,
+  as it is otherwise, not as an error.
 - **A method no route can declare is answered `501 Not Implemented`.** A
   request whose method is none of the seven a route can declare (`TRACE`,
   `CONNECT`, an extension method like `PURGE` or `PROPFIND`) was dispatched

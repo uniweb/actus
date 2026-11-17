@@ -88,10 +88,11 @@ pub struct Server {
     /// excess requests with `503 Service Unavailable` (via `WebError::Busy`).
     /// `None` is unbounded.
     max_inflight_body_bytes: Option<Arc<Semaphore>>,
-    /// `Some(d)` is forwarded to hyper's `http1::Builder::header_read_timeout`
-    /// — bounds how long after starting to read request headers we'll wait
-    /// before dropping the connection. Catches slowloris and clients that
-    /// TCP-connect-and-send-nothing. `None` leaves hyper's default (none).
+    /// `Some(d)` is forwarded to hyper's `http1::Builder::header_read_timeout`,
+    /// with a tokio timer — bounds how long hyper waits for a request's
+    /// headers, an idle keep-alive connection's next one included, before
+    /// dropping the connection. `None`: no timeout, since hyper's own default
+    /// needs the timer the server only gives it for `Some`.
     header_read_timeout: Option<Duration>,
     /// `Some(counter)`: every byte written to a connection is added to
     /// `counter` ([`Server::with_sent_bytes`]). `None` counts nothing (the
@@ -414,9 +415,13 @@ impl Server {
     ///
     /// No timeout by default: without this, an idle keep-alive connection
     /// stays open until either side closes it. (hyper's own 30-second default
-    /// needs a timer, which the server gives hyper only when this is set.)
+    /// needs a timer, which the server gives hyper only when this is set.) A
+    /// duration over a year is taken as a year: hyper adds it to the clock
+    /// unchecked, so a longer one, `Duration::MAX` for "never" say, would
+    /// overflow and panic every connection.
     pub fn with_header_read_timeout(mut self, d: Duration) -> Self {
-        self.header_read_timeout = Some(d);
+        const YEAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+        self.header_read_timeout = Some(d.min(YEAR));
         self
     }
 
@@ -619,8 +624,14 @@ impl Server {
                             }
                             _ = notify.notified() => {
                                 conn.as_mut().graceful_shutdown();
-                                if let Err(err) = conn.await {
-                                    error!("Error during graceful shutdown: {}", err);
+                                match conn.await {
+                                    // As above: the header-read timeout firing
+                                    // on a client still sending its headers.
+                                    Err(err) if err.is_timeout() => {
+                                        debug!("Closed connection during shutdown: {}", err);
+                                    }
+                                    Err(err) => error!("Error during graceful shutdown: {}", err),
+                                    Ok(()) => {}
                                 }
                             }
                         }
