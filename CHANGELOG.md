@@ -10,6 +10,8 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
+## [1.11.1]
+
 ### Fixed
 
 - **A `HEAD` follows declaration order, as other verbs do.** In 1.11.0 a
@@ -513,7 +515,8 @@ The final pre-1.0 polish — renames for consistency and explicitness:
 - Compression honors `Cache-Control: no-transform`.
 - The after-chain now runs on every reply that has a body.
 
-[Unreleased]: https://github.com/uniweb/actus/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/uniweb/actus/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/uniweb/actus/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/uniweb/actus/compare/v1.10.1...v1.11.0
 [1.10.1]: https://github.com/uniweb/actus/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/uniweb/actus/compare/v1.9.0...v1.10.0
