@@ -34,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{Instrument, Level, error, info, span, warn};
+use tracing::{Instrument, Level, debug, error, info, span, warn};
 
 type ResponseBody = BoxBody<Bytes, WebError>;
 
@@ -393,18 +393,20 @@ impl Server {
 
     /// Bound how long after starting to read request headers we'll wait
     /// before dropping the connection. Forwards to hyper's
-    /// `http1::Builder::header_read_timeout`. Catches slowloris (sending
-    /// headers one byte at a time) and clients that TCP-connect-and-send-
-    /// nothing — the most common file-descriptor-exhaustion attack on a
-    /// keep-alive HTTP server.
+    /// `http1::Builder::header_read_timeout`, and gives hyper the timer it
+    /// enforces it with. Catches slowloris (sending headers one byte at a
+    /// time) and clients that TCP-connect-and-send-nothing — the most common
+    /// file-descriptor-exhaustion attack on a keep-alive HTTP server.
     ///
-    /// Note: hyper 1.x doesn't have a separate "idle between requests"
-    /// timeout (after a complete request, an idle keep-alive connection
-    /// stays open until either side closes or the OS-level TCP keep-alive
-    /// fires). If that matters for your deployment, either disable
-    /// keep-alive entirely upstream of Actus or rely on the OS knobs.
+    /// The clock also runs while a keep-alive connection waits for its next
+    /// request (hyper starts it whenever it waits for a request's headers),
+    /// so this is the idle timeout of a keep-alive connection too. A
+    /// connection it closes gets no reply, and the server logs the close at
+    /// `DEBUG`, not as an error.
     ///
-    /// No timeout by default (hyper's default).
+    /// No timeout by default: without this, an idle keep-alive connection
+    /// stays open until either side closes it. (hyper's own 30-second default
+    /// needs a timer, which the server gives hyper only when this is set.)
     pub fn with_header_read_timeout(mut self, d: Duration) -> Self {
         self.header_read_timeout = Some(d);
         self
@@ -580,6 +582,9 @@ impl Server {
 
                         let mut builder = hyper::server::conn::http1::Builder::new();
                         if let Some(d) = header_timeout {
+                            // hyper enforces the timeout with a timer it is
+                            // given, and panics when it is set without one.
+                            builder.timer(hyper_util::rt::TokioTimer::new());
                             builder.header_read_timeout(d);
                         }
                         let conn = builder.serve_connection(
@@ -593,8 +598,15 @@ impl Server {
                         tokio::pin!(conn);
                         tokio::select! {
                             res = conn.as_mut() => {
-                                if let Err(err) = res {
-                                    error!("Error serving connection: {}", err);
+                                match res {
+                                    // The header-read timeout doing its job: a
+                                    // client that stalled, or a keep-alive
+                                    // connection left idle. Not a server error.
+                                    Err(err) if err.is_timeout() => {
+                                        debug!("Closed connection: {}", err);
+                                    }
+                                    Err(err) => error!("Error serving connection: {}", err),
+                                    Ok(()) => {}
                                 }
                             }
                             _ = notify.notified() => {

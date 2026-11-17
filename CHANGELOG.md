@@ -43,6 +43,19 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   `Params::verb` then reports. The `#[controller]` dispatch calls it for a
   `HEAD` it routes as a `GET`.
 
+### Fixed
+
+- **`Server::with_header_read_timeout` works.** It set hyper's header-read
+  timeout without the timer hyper enforces it with, and hyper panics on
+  that: every connection's task panicked before reading its request, so a
+  server with the setting answered nothing and every client got a reset.
+  The server now gives hyper a tokio timer when the timeout is set. A
+  client that has not sent its request's headers in time is disconnected
+  without a reply, and so is a keep-alive connection left idle that long,
+  since hyper starts the clock whenever it waits for a request. The server
+  logs such a close at `DEBUG`, not as an error. Without the setting,
+  nothing changes: there is still no header-read timeout by default.
+
 ## [1.10.1]
 
 ### Documentation
