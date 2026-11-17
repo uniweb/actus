@@ -23,6 +23,13 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   returns it as `WebError::Problem`. **Behavior change:** such a request
   used to reach the `GET` handler.
 
+### Documentation
+
+- `Server::with_header_read_timeout` says to set it longer than the idle
+  timeout of a proxy or load balancer in front of the server. It also closes
+  idle keep-alive connections, and a server that closes them before the
+  proxy does turns into intermittent `502`s at the proxy.
+
 ## [1.11.0]
 
 ### Changed

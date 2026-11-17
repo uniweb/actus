@@ -404,6 +404,14 @@ impl Server {
     /// connection it closes gets no reply, and the server logs the close at
     /// `DEBUG`, not as an error.
     ///
+    /// ⚠️ **Behind a proxy or load balancer, set it longer than the proxy's
+    /// idle timeout** (an AWS Application Load Balancer's is 60 seconds by
+    /// default), so that the proxy, not the server, closes idle connections.
+    /// A server that closes first lets the proxy send a request on a
+    /// connection that is closing, which the proxy reports to its client as a
+    /// `502`. The proxy reads a request's headers before it forwards them, so
+    /// behind one this setting is not where slowloris is stopped.
+    ///
     /// No timeout by default: without this, an idle keep-alive connection
     /// stays open until either side closes it. (hyper's own 30-second default
     /// needs a timer, which the server gives hyper only when this is set.)
