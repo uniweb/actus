@@ -35,12 +35,13 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   request whose method is none of the seven a route can declare (`TRACE`,
   `CONNECT`, an extension method like `PURGE` or `PROPFIND`) was dispatched
   as a `GET`: a cache sending `PURGE` got the page and a `200`, as though it
-  had purged something. RFC 9110 §9.1 asks for `501`. Routing still comes
-  first, so an unknown path is still a `404`, and the `before` chain still
-  runs first, so a middleware can answer such a method itself. The `501`
-  goes through the `after` chain like any other error. `Request::to_params`
-  returns it as `WebError::Problem`. **Behavior change:** such a request
-  used to reach the `GET` handler.
+  had purged something. RFC 9110 §9.1 asks for `501`, whatever the path
+  under a mounted controller; a path no controller is mounted at is still a
+  `404`. The `before` chain still runs first, so a middleware can answer
+  such a method itself, and the `501` goes through the `after` chain like
+  any other error. `Request::to_params` returns it as `WebError::Problem`,
+  so a middleware answering such a method reads the request directly.
+  **Behavior change:** such a request used to reach the `GET` handler.
 
 ### Changed
 
