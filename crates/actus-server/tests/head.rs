@@ -26,7 +26,16 @@ impl Pages {
         "form"          => form(params: &Params),
         GET "tagged"    => tagged(params: &Params),
         GET "endless"   => endless(),
+        GET "empty"     => empty(),
         POST "submit"   => submit(),
+    }
+
+    /// A `200` with no body.
+    pub async fn empty(&self) -> Reply {
+        Ok(reply::build_reply()
+            .status(StatusCode::OK)
+            .header("X-Empty", "1")
+            .done())
     }
 
     /// Names the verb it was dispatched with, so a test sees what the handler saw. The body is
@@ -109,10 +118,33 @@ impl Private {
     }
 }
 
+/// A `HEAD` declared for one pattern beside a `GET` for another that it also matches.
+struct Items;
+
+#[controller]
+impl Items {
+    routes! {
+        GET "export"  => export(),
+        HEAD "{id}"   => item_head(id: u64),
+    }
+
+    pub async fn export(&self) -> Reply {
+        reply!(json!({ "export": "everything" }))
+    }
+
+    pub async fn item_head(&self, _id: u64) -> Reply {
+        Ok(reply::build_reply()
+            .status(StatusCode::OK)
+            .header("X-Handler", "item_head")
+            .done())
+    }
+}
+
 app_routes! {
     routes {
         "pages"   => Pages,
         "private" => Private,
+        "items"   => Items,
     }
 }
 
@@ -320,6 +352,35 @@ async fn head_gets_the_304_its_get_gets() {
     assert_eq!(get.status, 200);
     assert_eq!(get.header("etag"), Some("\"v1\""));
     assert_head_is_get_without_body(&get, &head);
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn a_head_declared_for_another_pattern_leaves_an_earlier_get_its_head() {
+    // `HEAD "{id}"` also matches `export`, but `GET "export"` is declared first, so
+    // `HEAD /items/export` is that `GET`'s. (It reached `item_head` and got a `400`: `export`
+    // is no `u64`.)
+    let (addr, stop) = spawn(|s| s).await;
+    let (get, head) = get_and_head(addr, "/items/export", "").await;
+    assert_eq!(get.status, 200);
+    assert_head_is_get_without_body(&get, &head);
+    let head = request(addr, "HEAD", "/items/7", "").await;
+    assert_eq!(head.status, 200);
+    assert_eq!(head.header("x-handler"), Some("item_head"));
+    let _ = stop.send(());
+}
+
+#[tokio::test]
+async fn an_empty_reply_keeps_its_status_but_not_its_implicit_zero_length() {
+    // hyper states `content-length: 0` for an empty `GET` reply and leaves it off the `HEAD`'s,
+    // which RFC 9110 §9.3.2 allows: the one field that differs.
+    let (addr, stop) = spawn(|s| s).await;
+    let (get, head) = get_and_head(addr, "/pages/empty", "").await;
+    assert_eq!((get.status, head.status), (200, 200));
+    assert_eq!(get.header("content-length"), Some("0"));
+    assert_eq!(head.header("content-length"), None);
+    assert_eq!(head.header("x-empty"), Some("1"));
+    assert!(head.body.is_empty());
     let _ = stop.send(());
 }
 

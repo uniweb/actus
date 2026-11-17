@@ -12,6 +12,13 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ### Fixed
 
+- **A `HEAD` follows declaration order, as other verbs do.** In 1.11.0 a
+  route that declared `HEAD` took every `HEAD` its pattern matched, ahead of
+  an earlier, more specific `GET` route: with `GET "export"` and then
+  `HEAD "{id}"`, `HEAD /export` reached the `{id}` route and got a `400`
+  where `GET /export` got a `200`. Now a route that accepts `GET` answers a
+  `HEAD` in declaration order, unless a route declares `HEAD` for the same
+  pattern, which then takes it wherever it is declared.
 - **A method no route can declare is answered `501 Not Implemented`.** A
   request whose method is none of the seven a route can declare (`TRACE`,
   `CONNECT`, an extension method like `PURGE` or `PROPFIND`) was dispatched
@@ -29,6 +36,13 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   timeout of a proxy or load balancer in front of the server. It also closes
   idle keep-alive connections, and a server that closes them before the
   proxy does turns into intermittent `502`s at the proxy.
+- The README says that a `HEAD` runs its `GET`'s handler, side effects
+  included, and how to keep a `GET` that spends a one-time token or counts a
+  download from running on one: declare a `HEAD` route for its pattern, with
+  the `GET`'s parameters. `RouteDef::verb` is documented as the verbs a
+  route declares, which leave out the `HEAD` a `GET` brings, and
+  `Params::set_verb` as what any dispatcher calls after `routing::resolve`,
+  a hand-written one included.
 
 ## [1.11.0]
 
@@ -40,16 +54,20 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   running service as down. RFC 9110 §9.1 requires every general-purpose
   server to support it. Such a request is now handled as that `GET` (the
   same route, `prepare` hook, middleware and handler) and answered with the
-  `GET`'s status and headers, without the body. A buffered reply keeps the
-  `Content-Length` the `GET` would send; a streamed one, an SSE stream
-  included, is dropped unread. `params.verb()` reports `GET` for it, so a
+  `GET`'s status and headers, without the body. A reply with a body keeps
+  the `Content-Length` the `GET` states (an empty reply's implicit `0` is
+  left off); a streamed one, an SSE stream included, is dropped unread.
+  `params.verb()` reports `GET` for it, so a
   hook or a handler only ever sees a verb its route declares, while
   `Request::method`, which middleware and the access log read, still says
   `HEAD`. A route that declares `HEAD` takes it, ahead of a `GET` route for
   the same path. A `405`'s `Allow` names `HEAD` wherever it names `GET`. The
   OpenAPI document is unchanged: it lists declared operations.
   **Behavior change:** such a request used to get a `405`, and now reaches
-  the `GET` handler.
+  the `GET` handler. **Upgrading:** a `before` middleware that gates on
+  `request.method == Method::GET` now lets the `HEAD` of a gated `GET` reach
+  its handler. Gate both, or key the gate on the matched controller's
+  declaration.
 - **Actus no longer builds hyper's client or HTTP/2 into your application.**
   The workspace declared `hyper` and `hyper-util` with `features = ["full"]`,
   so every application on Actus compiled hyper's client, its HTTP/2 support

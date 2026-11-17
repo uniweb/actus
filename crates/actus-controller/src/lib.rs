@@ -182,8 +182,10 @@ pub struct RouteDef {
     /// so introspection tools (OpenAPI doc generators, route audit scripts)
     /// can identify the handler without grepping.
     pub handler: &'static str,
-    /// Verbs this route accepts. Always non-empty: a single-element slice for
+    /// Verbs this route declares. Always non-empty: a single-element slice for
     /// an explicitly declared verb, [`DEFAULT_VERBS`] for an unmarked route.
+    /// A route that declares `GET` also answers `HEAD`, which is not listed
+    /// here (see [`routing::resolve`]).
     pub verb: &'static [Verb],
     /// The route's declared parameters, in order.
     pub params: &'static [ParamDef],
@@ -329,24 +331,25 @@ impl Params {
         self.insert(AliasPrefix(prefix.into()));
     }
 
-    /// The HTTP verb this request was dispatched with: always one its route
-    /// declares.
+    /// The HTTP verb this request was dispatched with: one its route declares.
     ///
-    /// A `HEAD` that no route declares is dispatched as the `GET` it names
-    /// (see [`routing::resolve`]), so this reports `GET` for it, and the
-    /// `prepare` hook and the handler behave exactly as they do for the `GET`.
-    /// The server then sends the `GET`'s status and headers without the body.
-    /// The request's own method, which middleware and the access log see, is
-    /// still `HEAD`.
+    /// A `HEAD` that reaches a `GET` route is dispatched as that `GET` (see
+    /// [`routing::resolve`]), so this reports `GET` for it, and the `prepare`
+    /// hook and the handler behave exactly as they do for the `GET`, side
+    /// effects included. The server then sends the `GET`'s status and headers
+    /// without the body. The request's own method, which middleware and the
+    /// access log see, is still `HEAD`.
     pub fn verb(&self) -> Verb {
         self.verb
     }
 
     /// Set the verb this request is dispatched with, which [`Params::verb`]
-    /// reports from then on. The `#[controller]` dispatch calls this when
+    /// reports from then on. A dispatcher calls this when
     /// [`routing::resolve`] answers a `HEAD` with a `GET` route, so a handler
-    /// only ever sees a verb its route declares. Routing is over by then: this
-    /// changes what the hook and the handler read, not where the request goes.
+    /// only ever sees a verb its route declares: the `#[controller]` dispatch
+    /// does, and a hand-written `Controller::actus_dispatch` that calls
+    /// `resolve` should too. Routing is over by then: this changes what the
+    /// hook and the handler read, not where the request goes.
     pub fn set_verb(&mut self, verb: Verb) {
         self.verb = verb;
     }
@@ -779,6 +782,20 @@ pub mod routing {
         }
     }
 
+    /// Whether `route` answers a request with `verb`: it declares the verb, or
+    /// the verb is `HEAD`, the route accepts `GET`, and no route in `routes`
+    /// declares `HEAD` for the same pattern. That last clause is how a
+    /// declared `HEAD` takes its pattern's `HEAD` requests from the `GET`
+    /// route beside it, wherever it is declared.
+    fn answers(routes: &[RouteDef], route: &RouteDef, verb: Verb) -> bool {
+        route.verb.contains(&verb)
+            || (verb == Verb::HEAD
+                && route.verb.contains(&Verb::GET)
+                && !routes
+                    .iter()
+                    .any(|r| r.pattern == route.pattern && r.verb.contains(&Verb::HEAD)))
+    }
+
     /// Main route resolution function. Tries each route in declaration order
     /// and returns the first whose path pattern *and* verb both match, along
     /// with its extracted parameters.
@@ -789,12 +806,15 @@ pub mod routing {
     ///
     /// **`HEAD` comes with `GET`.** Every general-purpose server supports both
     /// (RFC 9110 §9.1), and a `HEAD` is a `GET` without the content (§9.3.2).
-    /// So a `HEAD` request goes to the first route that declares `HEAD`, and
-    /// when none matches it is resolved exactly as a `GET`, under the same
-    /// parameter rules, and the `GET` route is returned. The caller dispatches
-    /// it as that `GET`: the `#[controller]` dispatch sets [`Params::set_verb`]
-    /// to `GET`, and the server sends the `GET`'s status and headers without
-    /// the body. No other verb is implied.
+    /// So a route that accepts `GET` answers a `HEAD` too, in declaration
+    /// order like any verb, unless a route declares `HEAD` for the same
+    /// pattern: that route then takes the pattern's `HEAD` requests, wherever
+    /// it is declared. A `HEAD` that reaches a `GET` route is held to that
+    /// route's parameter rules, as its `GET` is. The caller dispatches it as
+    /// that `GET`, reporting `GET` from [`Params::verb`] by calling
+    /// [`Params::set_verb`] (the `#[controller]` dispatch does), and the server
+    /// sends the `GET`'s status and headers without the body. No other verb is
+    /// implied.
     ///
     /// When no route fully matches, the error distinguishes:
     /// - `WebError::MethodNotAllowed(methods)`: at least one route's *path*
@@ -809,29 +829,7 @@ pub mod routing {
         params: &Params,
         mode: ControllerMode,
     ) -> Result<(&'a RouteDef, ExtractedParams), WebError> {
-        match params.verb() {
-            // A route that declares `HEAD` takes it; failing that, it is the
-            // `GET` it names. (A `NotFound` means no pattern matched at all,
-            // which resolving as `GET` cannot change.)
-            Verb::HEAD => match resolve_as(routes, action, params, mode, Verb::HEAD) {
-                Err(WebError::MethodNotAllowed(_)) => {
-                    resolve_as(routes, action, params, mode, Verb::GET)
-                }
-                resolved => resolved,
-            },
-            verb => resolve_as(routes, action, params, mode, verb),
-        }
-    }
-
-    /// [`resolve`] for one verb: the first route whose pattern matches
-    /// `action` and whose verbs include `verb`.
-    fn resolve_as<'a>(
-        routes: &'a [RouteDef],
-        action: &str,
-        params: &Params,
-        mode: ControllerMode,
-        verb: Verb,
-    ) -> Result<(&'a RouteDef, ExtractedParams), WebError> {
+        let verb = params.verb();
         // Verbs accepted by routes whose *path* matched but whose verb didn't.
         let mut allowed_methods: Vec<&'static str> = Vec::new();
 
@@ -843,11 +841,10 @@ pub mod routing {
             };
 
             // Then verb check. `route.verb` is the (non-empty) set of verbs
-            // this route accepts; an unmarked route carries `DEFAULT_VERBS`.
-            if !route.verb.contains(&verb) {
-                // `HEAD` comes with `GET` (see `resolve`), so a `405`'s
-                // `Allow` names it wherever it names `GET`. Sorted and
-                // deduped below.
+            // this route declares; an unmarked route carries `DEFAULT_VERBS`.
+            if !answers(routes, route, verb) {
+                // `HEAD` comes with `GET`, so a `405`'s `Allow` names it
+                // wherever it names `GET`. Sorted and deduped below.
                 let implied_head = route.verb.contains(&Verb::GET).then_some(&Verb::HEAD);
                 allowed_methods.extend(route.verb.iter().chain(implied_head).map(Verb::as_str));
                 continue;
@@ -1534,6 +1531,35 @@ mod resolve_tests {
         ];
         assert_eq!(handler_for(ROUTES, "7", Verb::HEAD).unwrap(), "head");
         assert_eq!(handler_for(ROUTES, "7", Verb::GET).unwrap(), "get");
+    }
+
+    #[test]
+    fn a_head_declared_for_another_pattern_leaves_an_earlier_get_its_head() {
+        // `HEAD "{id}"` must not take `HEAD /export` from the `GET "export"`
+        // declared before it: the `HEAD` would get a `400` (`export` is no
+        // `u64`) where its `GET` gets a `200`.
+        static ROUTES: &[RouteDef] = &[
+            route("export", "export", &[Verb::GET]),
+            route("{id}", "item_head", &[Verb::HEAD]),
+        ];
+        assert_eq!(handler_for(ROUTES, "export", Verb::HEAD).unwrap(), "export");
+        assert_eq!(handler_for(ROUTES, "7", Verb::HEAD).unwrap(), "item_head");
+    }
+
+    #[test]
+    fn head_follows_declaration_order_like_any_verb() {
+        // A `HEAD` route declared first takes every `HEAD` its pattern
+        // matches, as a `GET "{id}"` declared before `GET "special"` takes
+        // every `GET`.
+        static ROUTES: &[RouteDef] = &[
+            route("{...path}", "any_head", &[Verb::HEAD]),
+            route("status", "status", &[Verb::GET]),
+        ];
+        assert_eq!(
+            handler_for(ROUTES, "status", Verb::HEAD).unwrap(),
+            "any_head"
+        );
+        assert_eq!(handler_for(ROUTES, "status", Verb::GET).unwrap(), "status");
     }
 
     #[test]
