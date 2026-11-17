@@ -1040,10 +1040,11 @@ impl Server {
     ///    `before` middleware (which only gets `&Request`) can read it; then
     ///    decide from its codings how to buffer the body — as sent, decoded
     ///    from gzip, or refused (`415` / `501`) — also without reading it
-    /// 5. buffer the body, capped per the resolved policy (today: server-
-    ///    wide; soon, per-controller / per-route)
+    /// 5. buffer the body, capped at the matched controller's
+    ///    `max_body_bytes`, else the server-wide cap
     /// 6. middleware `before`
-    /// 7. `to_params` (Content-Type-driven body parse)
+    /// 7. `to_params` (Content-Type-driven body parse); a method no route can
+    ///    declare is a `501` here, so a `before` middleware can still answer it
     /// 8. dispatch via the already-matched controller
     /// 9. middleware `after` + finalize
     ///

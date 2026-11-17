@@ -3,7 +3,7 @@
 //! [`Params`].
 
 use actus_controller::{Params, Verb};
-use actus_reply::WebError;
+use actus_reply::{ProblemDetails, WebError};
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -441,6 +441,12 @@ impl Request {
 
     /// Converts the request into a `Params` object for controller methods.
     ///
+    /// A method that is none of the seven [`Verb`]s (`TRACE`, `CONNECT`, an
+    /// extension method like `PURGE`) has no route that could declare it, so
+    /// it is refused with `501 Not Implemented` (RFC 9110 §9.1) rather than
+    /// dispatched. The server calls this after the `before` chain, so a
+    /// middleware can still answer such a method itself.
+    ///
     /// Body handling is content-type discriminated. Each non-empty body
     /// must declare its type via `Content-Type`; the four outcomes are:
     ///
@@ -465,6 +471,12 @@ impl Request {
     /// auto-JSON-sniff path; auto-sniff silently dropped binary
     /// payloads on the floor.)
     pub fn to_params(&self) -> Result<Params, WebError> {
+        let verb = method_to_verb(&self.method).ok_or_else(|| {
+            WebError::Problem(
+                ProblemDetails::new(http::StatusCode::NOT_IMPLEMENTED, "Not Implemented")
+                    .detail(format!("this server does not implement {}", self.method)),
+            )
+        })?;
         let mut all_params = self.query_params.clone();
 
         let content_type = self
@@ -523,7 +535,7 @@ impl Request {
         }
 
         Ok(Params::new(
-            method_to_verb(&self.method),
+            verb,
             all_params,
             json_body,
             self.body.clone(),
@@ -597,8 +609,10 @@ pub(crate) fn has_undecoded_transfer_coding(headers: &HeaderMap) -> bool {
     }
 }
 
-fn method_to_verb(method: &http::Method) -> Verb {
-    match method {
+/// The [`Verb`] a route would declare for `method`, or `None` for a method no
+/// route can declare (`TRACE`, `CONNECT`, an extension method like `PURGE`).
+fn method_to_verb(method: &http::Method) -> Option<Verb> {
+    Some(match method {
         m if m == http::Method::GET => Verb::GET,
         m if m == http::Method::POST => Verb::POST,
         m if m == http::Method::PUT => Verb::PUT,
@@ -606,8 +620,8 @@ fn method_to_verb(method: &http::Method) -> Verb {
         m if m == http::Method::PATCH => Verb::PATCH,
         m if m == http::Method::HEAD => Verb::HEAD,
         m if m == http::Method::OPTIONS => Verb::OPTIONS,
-        _ => Verb::GET,
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -854,6 +868,34 @@ mod tests {
             params.header_all("Forwarded"),
             ["for=1.2.3.4", "for=10.0.0.1"]
         );
+    }
+
+    #[test]
+    fn a_method_no_route_can_declare_is_501_not_a_get() {
+        for method in ["TRACE", "CONNECT", "PURGE", "PROPFIND"] {
+            let mut request = req(None, b"");
+            request.method = http::Method::from_bytes(method.as_bytes()).unwrap();
+            match request.to_params().map(|p| p.verb()) {
+                Err(WebError::Problem(p)) => {
+                    assert_eq!(p.status, http::StatusCode::NOT_IMPLEMENTED, "{method}")
+                }
+                other => panic!("{method}: expected a 501, got {other:?}"),
+            }
+        }
+        // The seven a route can declare still convert, each to itself.
+        for (method, verb) in [
+            (http::Method::GET, Verb::GET),
+            (http::Method::POST, Verb::POST),
+            (http::Method::PUT, Verb::PUT),
+            (http::Method::DELETE, Verb::DELETE),
+            (http::Method::PATCH, Verb::PATCH),
+            (http::Method::HEAD, Verb::HEAD),
+            (http::Method::OPTIONS, Verb::OPTIONS),
+        ] {
+            let mut request = req(None, b"");
+            request.method = method;
+            assert_eq!(request.to_params().unwrap().verb(), verb);
+        }
     }
 
     #[test]

@@ -10,6 +10,19 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A method no route can declare is answered `501 Not Implemented`.** A
+  request whose method is none of the seven a route can declare (`TRACE`,
+  `CONNECT`, an extension method like `PURGE` or `PROPFIND`) was dispatched
+  as a `GET`: a cache sending `PURGE` got the page and a `200`, as though it
+  had purged something. RFC 9110 §9.1 asks for `501`. Routing still comes
+  first, so an unknown path is still a `404`, and the `before` chain still
+  runs first, so a middleware can answer such a method itself. The `501`
+  goes through the `after` chain like any other error. `Request::to_params`
+  returns it as `WebError::Problem`. **Behavior change:** such a request
+  used to reach the `GET` handler.
+
 ## [1.11.0]
 
 ### Changed
