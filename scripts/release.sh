@@ -131,9 +131,10 @@ _step "Bumping $CUR → $NEW"
 # (1) [workspace.package] version — the only bare `version = "…"` at line start.
 perl -pi -e "s{^version = \"\Q$CUR\E\"$}{version = \"$NEW\"}" Cargo.toml
 # (2) The five internal dep pins, identified by `path = "crates/…"` on the line.
-perl -pi -e "s{(path = \"crates/[^\"]*\", version = )\"\Q$CUR\E\"}{\${1}\"$NEW\"}" Cargo.toml
+#     actus-controller-macros' is exact (`"=X.Y.Z"`); its `=` is kept.
+perl -pi -e "s{(path = \"crates/[^\"]*\", version = \"=?)\Q$CUR\E\"}{\${1}$NEW\"}" Cargo.toml
 
-BUMPED="$(grep -c "\"$NEW\"" Cargo.toml || true)"
+BUMPED="$(grep -cE "\"=?${NEW//./\\.}\"" Cargo.toml || true)"
 (( BUMPED == 6 )) || _die "expected 6 version edits in Cargo.toml (1 workspace + 5 internal pins), made $BUMPED — the manifest layout changed; fix this script"
 _ok "Cargo.toml — workspace version + 5 internal pins"
 

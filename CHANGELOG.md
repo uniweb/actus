@@ -42,6 +42,16 @@ See [Stability](README.md#stability) for what the `1.x` series commits to.
   returns it as `WebError::Problem`. **Behavior change:** such a request
   used to reach the `GET` handler.
 
+### Changed
+
+- **actus-controller requires the exact actus-controller-macros version it
+  ships with.** The macros emit code that calls actus-controller, since 1.11
+  `Params::set_verb`, which older versions lack. With a caret requirement,
+  Cargo could pair the 1.11 macros with actus-controller 1.10, and then every
+  `#[controller]` failed to compile. An exact requirement prevents it from
+  here on; a lockfile still holding actus-controller 1.10 should update the
+  two together.
+
 ### Documentation
 
 - `Server::with_header_read_timeout` says to set it longer than the idle
